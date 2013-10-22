@@ -706,7 +706,8 @@ EOREGEX
 			} else {
 				$data = $this->deletes;
 				$mode = -1;
-			}		
+			}
+  		$origmode = $mode;
 			$tables = array_keys($data);
 			foreach($tables as $table) {
 				$rows = $data[$table];	
@@ -718,6 +719,7 @@ EOREGEX
 					$DML = $the_row['fv$DML'];
 					unset($the_row['fv$DML']);
 					unset($the_row['fv$gsn']);
+					$mode = $origmode;
 					foreach($the_row as $pos => $col) {
 						if($col[0] == "'") {
 							$col = "'" . mysql_real_escape_string(trim($col,"'")) . "'";
@@ -773,10 +775,10 @@ EOREGEX
 
 					if($valList) $valList .= ",\n";	
 
-  				if( $this->DML == "UPDATE" && $this->mark_updates ) {
-  				  if( $mode=1 ) {
+  				if( $DML == "UPDATE" && $this->mark_updates ) {
+  				  if( $mode==1 ) {
   				    $mode=2;
-  				  } elseif( $mode=-1 ) {
+  				  } elseif( $mode==-1 ) {
   					  $mode=-2;
   					}
 					}
