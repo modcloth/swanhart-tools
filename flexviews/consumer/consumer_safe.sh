@@ -8,7 +8,7 @@ do
     exit 0
   fi
   echo "Restarting FlexCDC!"
-	echo "Restarting FlexCDC!" | mail dwh_alerts@modcloth.com
+	echo "Restarting FlexCDC!" | mail dwh_alerts@example.com
   sleep 1000
 
 done

@@ -774,7 +774,11 @@ EOREGEX
 					if($valList) $valList .= ",\n";	
 
   				if( $this->DML == "UPDATE" && $this->mark_updates ) {
-					  $mode=$mode*2;
+  				  if( $mode=1 ) {
+  				    $mode=2;
+  				  } elseif( $mode=-1 ) {
+  					  $mode=-2;
+  					}
 					}
 					$valList .= "($mode, @fv_uow_id, $this->binlogServerId,$gsn," . implode(",", $row) . ")";
 					$bytes = strlen($valList) + strlen($sql);
