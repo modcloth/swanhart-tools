@@ -31,6 +31,7 @@ function die1($error = 1,$error2=1) {
 	if(is_string($error)) { 
 		echo1($error . "\n");
 		exit($error2);
+    /*echo1("Hehe.. Will proceed anyway"."\n");*/
 	} else {
 		exit($error);
 	}
@@ -243,7 +244,7 @@ EOREGEX
 
 		$key = $schema . $table . $pos;
 		if(!empty($cache[$key])) {
-			return $cache[$key][0];
+			return $cache[$key];
 		} 
 
 		$log_name = 'mvlog_' . md5(md5($schema) . md5($table));
@@ -706,7 +707,7 @@ EOREGEX
 			} else {
 				$data = $this->deletes;
 				$mode = -1;
-			}
+			}		
   		$origmode = $mode;
 			$tables = array_keys($data);
 			foreach($tables as $table) {
