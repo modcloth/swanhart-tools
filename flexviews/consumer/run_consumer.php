@@ -4,7 +4,17 @@ if (is_resource(STDIN)) fclose(STDIN);
 require_once('include/flexcdc.php');
 require_once('Console/Getopt.php');
 declare(ticks = 1);
+
+$HOME=getenv("HOME");
+echo 'HOME: '.$HOME."\n";
+
 $ERROR_FILE=false;
+$current_date = date('Ymd_His');
+$ERROR_FILE=$HOME.'/flex_cdc_logs/flexcdc_'.$current_date.'.log';
+echo 'ERROR_FILE: '.$ERROR_FILE."\n";
+$ERROR_FILE = fopen($ERROR_FILE, 'w') or die1("could not open the error log for writing");
+echo1('Starting run_consumer.php');
+
 if (function_exists('pcntl_signal')) {
 	pcntl_signal(SIGTERM, "sig_handler");
 	pcntl_signal(SIGHUP,  "sig_handler");
@@ -58,8 +68,9 @@ if(!empty($params['ini'])) {
 	$settings = @parse_ini_file($params['ini'], true);
 }
 
-if(!empty($settings['flexcdc']['error_log'])) $ERROR_FILE=$settings['flexcdc']['error_log']; else $ERROR_FILE="flexcdc.err";		
-$ERROR_FILE = fopen($ERROR_FILE, 'w') or die1("could not open the error log for writing");
+echo "I'm here"."\n";
+#if(!empty($settings['flexcdc']['error_log'])) $ERROR_FILE=$settings['flexcdc']['error_log']; else $ERROR_FILE="flexcdc.err2";		
+#$ERROR_FILE = fopen($ERROR_FILE, 'w') or die1("could not open the error log for writing");
 
 if(in_array('daemon', array_keys($params))) {
 	if (is_resource(STDERR)) fclose(STDERR);
@@ -102,7 +113,7 @@ if(empty($settings['flexcdc']['error_log'])) {
 	$error_log = $settings['flexcdc']['error_log'];
 }
 
-
 $cdc = new FlexCDC($settings);
+
 #capture changes forever (-1):
 $cdc->capture_changes(-1);

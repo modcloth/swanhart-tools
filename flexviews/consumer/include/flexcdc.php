@@ -29,7 +29,7 @@ We want to exit with error code 1 when a string is passed in.
 */
 function die1($error = 1,$error2=1) {
 	if(is_string($error)) { 
-		echo1($error . "\n");
+		echo1('ERROR! '.$error . "\n");
 		exit($error2);
     /*echo1("Hehe.. Will proceed anyway"."\n");*/
 	} else {
@@ -39,7 +39,8 @@ function die1($error = 1,$error2=1) {
 
 function echo1($message) {
 	global $ERROR_FILE;
-	fputs(isset($ERROR_FILE) && is_resource($ERROR_FILE) ? $ERROR_FILE : STDERR, $message);
+        $current_date = date('Y-m-d H:i:s');
+	fputs(isset($ERROR_FILE) && is_resource($ERROR_FILE) ? $ERROR_FILE : STDERR, $current_date.' '.$message."\n\n");
 
 }
 
@@ -189,7 +190,7 @@ EOREGEX
 		if(!empty($settings['flexcdc']['mysqlbinlog'])) {
 			$this->cmdLine = $settings['flexcdc']['mysqlbinlog'];
 		} 
-		
+
 		#build the command line from user, host, password, socket options in the ini file in the [source] section
 		foreach($settings['source'] as $k => $v) {
 			$this->cmdLine .= " --$k=$v";
@@ -381,11 +382,13 @@ EOREGEX
 	}
 	#Capture changes from the source into the dest
 	public function capture_changes($iterations=1) {
-				
+
+                echo1("Starting function capture_changes");
 		$this->initialize();
 		
 		$count=0;
 		$sleep_time=0;
+
 		while($iterations <= 0 || ($iterations >0 && $count < $iterations)) {
 			$this->initialize();
 			#retrieve the list of logs which have not been fully processed
@@ -395,11 +398,13 @@ EOREGEX
 			         WHERE server_id=" . $this->serverId .  
 			       "   AND exec_master_log_pos < master_log_size 
 			         ORDER BY master_log_file;";
-			
+		
+                        #echo1("Query to retrieve list of unprocessed binlogs: ".$sql);	
 		
 			#echo " -- Finding binary logs to process\n";
 			$stmt = my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error() . "\n");
 			$processedLogs = 0;
+                        echo1("Inside capture_changes, before while loop");
 			while($row = mysql_fetch_assoc($stmt)) {
 				++$processedLogs;
 				$this->delimiter = ';';
@@ -407,7 +412,9 @@ EOREGEX
 				if ($row['exec_master_log_pos'] < 4) $row['exec_master_log_pos'] = 4;
 				$execCmdLine = sprintf("%s --base64-output=decode-rows -v -R --start-position=%d --stop-position=%d %s", $this->cmdLine, $row['exec_master_log_pos'], $row['master_log_size'], $row['master_log_file']);
 				$execCmdLine .= " 2>&1";
-				echo  "-- $execCmdLine\n";
+
+                                echo1("execCmdLine: ". $execCmdLine);
+
 				$proc = popen($execCmdLine, "r");
 				if(!$proc) {
 					die1('Could not read binary log using mysqlbinlog\n');
@@ -421,10 +428,12 @@ EOREGEX
 				$this->binlogPosition = $row['exec_master_log_pos'];
 				$this->logName = $row['master_log_file'];
 				$this->process_binlog($proc, $row['master_log_file'], $row['exec_master_log_pos'],$line);
+                                echo1("Inside capture_changes, Inside while loop, after process_binlog");
 				$this->set_capture_pos();	
 				my_mysql_query('commit', $this->dest);
 				pclose($proc);
 			}
+                        echo1("Inside capture_changes, After while loop");
 
 			if($processedLogs) ++$count;
 
@@ -435,7 +444,7 @@ EOREGEX
 				} else {
 					$sleep_time += $this->settings['flexcdc']['sleep_increment'];
 					$sleep_time = $sleep_time > $this->settings['flexcdc']['sleep_maximum'] ? $this->settings['flexcdc']['sleep_maximum'] : $sleep_time;
-					#echo1('sleeping:' . $sleep_time . "\n");
+					echo1('sleeping:' . $sleep_time );
 					sleep($sleep_time);
 				}
 			}
@@ -458,6 +467,8 @@ EOREGEX
 			die1("Could not find [flexcdc] section or .ini file not found");
 		}
 
+    echo "Reading settings"."\n";
+
 		return $settings;
 	}
 
@@ -467,6 +478,7 @@ EOREGEX
 		$this->mvlogList = array();
 			
 		$sql = "SELECT table_schema, table_name, mvlog_name from `" . $this->mvlogs . "` where active_flag=1";
+                echo1("Inside refresh_mvlog_cache: ".$sql);
 		$stmt = my_mysql_query($sql, $this->dest);
 		while($row = mysql_fetch_array($stmt)) {
 			$this->mvlogList[$row[0] . $row[1]] = $row[2];
@@ -586,6 +598,8 @@ EOREGEX
 	/* Update the binlog_consumer_status table to indicate where we have executed to. */
 	function set_capture_pos() {
 		$sql = sprintf("UPDATE `" . $this->mvlogDB . "`.`" . $this->binlog_consumer_status . "` set exec_master_log_pos = %d where master_log_file = '%s' and server_id = %d", $this->binlogPosition, $this->logName, $this->serverId);
+
+                echo1("Updating binlog_consumer_status ".$sql);
 		
 		my_mysql_query($sql, $this->dest) or die1("COULD NOT EXEC:\n$sql\n" . mysql_error($this->dest));
 		
@@ -596,9 +610,11 @@ EOREGEX
 		my_mysql_query("START TRANSACTION", $this->dest) or die1("COULD NOT START TRANSACTION;\n" . mysql_error());
         	$this->set_capture_pos();
 		$sql = sprintf("INSERT INTO `" . $this->mview_uow . "` values(NULL,str_to_date('%s', '%%y%%m%%d %%H:%%i:%%s'),%d);",rtrim($this->timeStamp),$this->gsn_hwm);
+                echo1("Inside start_transaction, sql1: ".$sql);
 		my_mysql_query($sql,$this->dest) or die1("COULD NOT CREATE NEW UNIT OF WORK:\n$sql\n" .  mysql_error());
 		 
 		$sql = "SET @fv_uow_id := LAST_INSERT_ID();";
+                echo1("Inside start_transaction, sql2: ".$sql);
 		my_mysql_query($sql, $this->dest) or die1("COULD NOT EXEC:\n$sql\n" . mysql_error($this->dest));
 
 	}
@@ -607,21 +623,27 @@ EOREGEX
     /* Called when a transaction commits */
 	function commit_transaction() {
 
+	        echo1("Starting commit_transaction");
+
 		//Handle bulk insertion of changes
 		if(!empty($this->inserts) || !empty($this->deletes)) {
+	                echo1("Inside commit_transaction, before process_rows ");
 			$this->process_rows();
 		}
 		$this->inserts = $this->deletes = $this->tables = array();
-
+                
+                echo1("Inside commit_transaction, before set_capture_pos");
 		$this->set_capture_pos();
 		$sql = "UPDATE `{$this->mvlogDB}`.`{$this->mview_uow}` SET `commit_time`=str_to_date('%s','%%y%%m%%d %%H:%%i:%%s'), `gsn_hwm` = %d WHERE `uow_id` = @fv_uow_id";
 		$sql = sprintf($sql, rtrim($this->timeStamp),$this->gsn_hwm);
+                echo1("Inside commit_transaction, sql: ".$sql);
 		my_mysql_query($sql, $this->dest) or die('COULD NOT UPDATE ' . $this->mvlogDB . "." . $this->mview_uow . ':' . mysql_error($this->dest) . "\n");
 		my_mysql_query("COMMIT", $this->dest) or die1("COULD NOT COMMIT TRANSACTION;\n" . mysql_error());
 	}
 
 	/* Called when a transaction rolls back */
 	function rollback_transaction() {
+                echo1("Inside rollback_transaction");
 		$this->inserts = $this->deletes = $this->tables = array();
 		my_mysql_query("ROLLBACK", $this->dest) or die1("COULD NOT ROLLBACK TRANSACTION;\n" . mysql_error());
 		#update the capture position and commit, because we don't want to keep reading a truncated log
@@ -697,7 +719,9 @@ EOREGEX
 	}
 
 	function process_rows() {
+		echo1("Starting function process_rows");
 		$i = 0;
+                $num_updates = 0;
 		
 		while($i<2) {
 			$valList =  "";
@@ -777,19 +801,24 @@ EOREGEX
 					if($valList) $valList .= ",\n";	
 
   				if( $DML == "UPDATE" && $this->mark_updates ) {
+				  echo1("Inside function process_rows, inside UPDATE");
+			          $num_updates++;
+				  echo1("Inside function process_rows, num_updates: ".$num_updates);
   				  if( $mode==1 ) {
   				    $mode=2;
   				  } elseif( $mode==-1 ) {
   					  $mode=-2;
   					}
 					}
-					$valList .= "($mode, @fv_uow_id, $this->binlogServerId,$gsn," . implode(",", $row) . ")";
-					$bytes = strlen($valList) + strlen($sql);
-					$allowed = floor($this->max_allowed_packet * .9);  #allowed len is 90% of max_allowed_packet	
-					if($bytes > $allowed) {
-						my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
-						$valList = "";
-					}
+				$valList .= "($mode, @fv_uow_id, $this->binlogServerId,$gsn," . implode(",", $row) . ")";
+				$bytes = strlen($valList) + strlen($sql);
+				$allowed = floor($this->max_allowed_packet * .9);  #allowed len is 90% of max_allowed_packet	
+				if(($bytes > $allowed) || ($num_updates >= 100)) {
+				    echo1("Inside function process_rows, after bytes allowed, sql: ".$sql);
+				    my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+				    $valList = "";
+				    $num_updates = 0;
+				  }
 					
 				}
 				if($valList) {
@@ -813,6 +842,8 @@ EOREGEX
 	 */	
 	function statement($sql) {
 
+                echo1("Inside function statement");
+
 		$sql = trim($sql);
 		#TODO: Not sure  if this might be important..
 		#      In general, I think we need to worry about character
@@ -833,6 +864,8 @@ EOREGEX
 		$command = $matches[1];
 		$command = str_replace($this->delimiter,'', $command);
 		$args = $matches[2];
+
+                echo1("Inside function statement, before switch, command: ".$command);
 	
 		switch(strtoupper($command)) {
 			#register change in delimiter so that we properly capture statements
@@ -860,6 +893,7 @@ EOREGEX
 				break;
 				
 			case 'COMMIT':
+		                echo1("Inside function statement, inside switch, inside COMMIT");
 				$this->commit_transaction();
 				break;
 				
@@ -948,7 +982,9 @@ EOREGEX
 				break;
 
 			case 'ALTER':
+                                echo1("ALTER DDL found");
 				$tokens = FlexCDC::split_sql($sql);
+                                echo1("tokens: ".$tokens);
 				$is_alter_table = -1;
 				foreach($tokens as $key => $token) {
 					if(strtoupper($token) == 'TABLE') {
@@ -1077,6 +1113,7 @@ EOREGEX
 	} 
 	
 	function process_binlog($proc, $lastLine="") {
+                echo1("Starting process_binlog ...");
 		$binlogStatement="";
 		$this->timeStamp = false;
 
@@ -1090,6 +1127,7 @@ EOREGEX
 		#In this case we use that line instead of reading from the file again
 		$this->current_dml = null;
 		while( !feof($proc) || $lastLine !== '') {
+
 			if($lastLine) {
 				#use a previously saved line (from process_rowlog)
 				$line = $lastLine;
@@ -1098,6 +1136,8 @@ EOREGEX
 				#read from the process
 				$line = trim(fgets($proc));
 			}
+
+                        echo1("Inside process_binlog, line: ".$line);
 
 			#echo "-- $line\n";
 			#It is faster to check substr of the line than to run regex
@@ -1111,6 +1151,7 @@ EOREGEX
 
 			#Control information from MySQLbinlog is prefixed with a hash comment.
 			if($prefix[0] == "#") {
+                        echo1("Inside process_binlog, control info section");
 				$binlogStatement = "";
 				if (preg_match('/^#([0-9]+\s+[0-9:]+)\s+server\s+id\s+([0-9]+)\s+end_log_pos ([0-9]+).*/', $line,$matches)) {
 					$this->timeStamp = $matches[1];
@@ -1145,23 +1186,32 @@ EOREGEX
 				}
 		 
 			}	else {
+                           echo1("Inside process_binlog, else  section");
 				
 				if($binlogStatement) {
 					$binlogStatement .= " ";
 				}
+                                echo1("Inside process_binlog, binlogStatement1: ".$binlogStatement);
 				$binlogStatement .= $line;
+                                echo1("Inside process_binlog, binlogStatement2: ".$binlogStatement);
 				$pos=false;				
 				if(($pos = strpos($binlogStatement, $this->delimiter)) !== false)  {
+                                        echo1("Inside process_binlog, inside last if");
 					#process statement
 					$this->statement($binlogStatement);
+					echo1("Inside process_binlog, after this: ");
 					$binlogStatement = "";
 				} 
 			}
 		}
+
+	    echo1("Finishing  process_binlog");
 	}
 	
 	
 	function process_rowlog($proc) {
+                echo1("Starting process_rowlog... ");
+
 		$sql = "";
 		$skip_rows = false;
 		$line = "";
@@ -1241,6 +1291,7 @@ EOREGEX
 		}
 		#return the last line so that we can process it in the parent body
 		#you can't seek backwards in a proc stream...
+                echo1("Finishing process_rowlog: ".$line);
 		return $line;
 	}
 
