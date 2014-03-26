@@ -5,12 +5,7 @@ mysqlbinlog=/usr/local/mysql/bin/mysqlbinlog
 ;The database in which to write changelogs and in which to store the state tables (see the next section).  If you are using Flexviews, then you MUST NOT change this value.
 database=flexviews
 
-;where to write error messages (default is the current directory) 
-;must be full path and filename otherwise
-error_log=flexcdc.err
-
 ;the following three tables store the metadata information for FlexCDC including at which binary log file/position to which binary logs have been processed. You MUST NOT include database names on these tables.  They will all be placed into the database specified above.  If you are using flexcdc for something OTHER THAN FLEXVIEWS then you can remap the table names which FlexCDC uses to alternative names.  DO NOT CHANGE THESE VALUES IF YOU ARE USING FLEXVIEWS or if you don't have a very good reason to change them.
-
 binlog_consumer_status=binlog_consumer_status
 mvlogs=mvlogs
 mview_uow=mview_uow
@@ -25,7 +20,6 @@ log_retention_interval="10 DAY"
 ;since flexcdc uses row-based replication, you don't have to worry about cross database changes 
 
 ;only_databases=flexviews,db1,db2,db3
-;
 
 ;FlexCDC normally records "before" images for updates (recorded as a DELETE).  This can be disabled
 ;by setting skip_before_update=true.  In that case, only an INSERT will be written.
@@ -33,7 +27,7 @@ log_retention_interval="10 DAY"
 ;ONLY SET THIS OPTION IF USING FLEXCDC STANDALONE AND YOU KNOW WHAT YOU ARE DOING
 skip_before_update=false
 
-;FlexCDC normally marks INSERTS as a dml_type=1 and DELETEDS as dml_type=-1.
+;FlexCDC normally marks INSERTS as a dml_type=1 and DELETES as dml_type=-1.
 ;Some ETLs need to know that a insert or delete is from an update statement.
 ;set mark_updates=true if you want the dml_type for INSERTS to be 2 and for DELETES -2.
 ;SETTING THIS OPTION *IS NOT COMPATIBLE WITH FLEXVIEWS MATERIALIZED VIEWS*!!!!!!!!!
@@ -66,6 +60,19 @@ bulk_insert=true
 ;recently committed.
 sleep_increment=.25
 sleep_maximum=5
+
+;Email Message Header
+email_message_header=DEV
+
+;How long consumer_safe.sh sleeps for between retries (default 30 seconds)
+;failure_sleep_time=30
+
+;Where to write the consumer safe .ini file
+;make this is a symlink or hard link or a path
+;failure_log_file=flex_cdc_log.log
+
+;where to send an email with a tail of the flexcdc.err file
+;failure_email_address=root@localhost
 
 ;The SOURCE is where the change logs are read from.  This does not have to be the same as the local machine.
 ;this user requires "grant replication client,replication slave"

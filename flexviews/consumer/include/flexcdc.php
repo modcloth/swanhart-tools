@@ -18,48 +18,65 @@
     If not, see <http://www.gnu.org/licenses/>.
 */
 
+require_once 'log4php/Logger.php';
+Logger::configure('log4php_cfg.xml');
+
 error_reporting(E_ALL);
 ini_set('memory_limit', 1024 * 1024 * 1024);
 define('SOURCE', 'source');
 define('DEST', 'dest');
+
+$debug_level = 0;
+global $logger;
+global $email_message_header;
+$logger = Logger::getLogger("main");
+$logger->info("Starting flexcdc.php");
 
 /* 
 The exit/die() functions normally exit with error code 0 when a string is passed in.
 We want to exit with error code 1 when a string is passed in.
 */
 function die1($error = 1,$error2=1) {
+  global $logger;
 	if(is_string($error)) { 
-		echo1('ERROR! '.$error . "\n");
+		$logger->fatal('ERROR! '.$error . "\n");
 		exit($error2);
-    /*echo1("Hehe.. Will proceed anyway"."\n");*/
 	} else {
 		exit($error);
 	}
 }
 
-function echo1($message) {
-	global $ERROR_FILE;
-        $current_date = date('Y-m-d H:i:s');
-	fputs(isset($ERROR_FILE) && is_resource($ERROR_FILE) ? $ERROR_FILE : STDERR, $current_date.' '.$message."\n\n");
-
+function send_email($message) {
+  global $email_message_header;
+  mail('r.birch@modcloth.com', "[".$email_message_header."] FlexCDC Message", $message);
 }
 
-function my_mysql_query($a, $b=NULL, $debug=false) {
-	if($debug) echo "$a\n";
+function check_stop() {
+  global $logger;
+  $filename = 'stop';
+
+  if (file_exists($filename)) {
+      $logger->info("Detected stop file.");
+      unlink ($filename);
+      exit (8);
+  }
+}
+
+function my_mysql_query($a, $b=NULL) {
+  global $logger;
+  $logger->debug("$a");
 
 	if($b) {
-	$r = mysql_query($a, $b);
-		} else { 
-	$r = mysql_query($a);
+	  $r = mysql_query($a, $b);
+	} else { 
+	  $r = mysql_query($a);
 	}
 
 	if(!$r) {
-		echo1("SQL_ERROR IN STATEMENT:\n$a\n");
-		if($debug) {
-			$pr = mysql_error();
-			echo1(print_r(debug_backtrace(),true));
-			echo1($pr);
-		}
+		$logger->fatal("SQL_ERROR IN STATEMENT:\n$a\n");
+    $pr = mysql_error();
+    $logger->fatal(print_r(debug_backtrace(),true));
+    $logger->fatal($pr);
 	}
 
 	return $r;
@@ -74,7 +91,7 @@ class FlexCDC {
     	return $result;
   	}
   	
-  	static function split_sql($sql) {
+  static function split_sql($sql) {
 		$regex=<<<EOREGEX
 /
 |(\(.*?\))   # Match FUNCTION(...) OR BAREWORDS
@@ -96,12 +113,13 @@ EOREGEX
 	protected $bulk_insert = true;
   	
 	protected $mvlogDB = NULL;
-	public	$mvlogList = array();
+	public	  $mvlogList = array();
 	protected $activeDB = NULL;
 	protected $onlyDatabases = array();
 	protected $cmdLine;
 
 	protected $tables = array();
+	protected $col_def = array();
 
 	protected $mvlogs = 'mvlogs';
 	protected $binlog_consumer_status = 'binlog_consumer_status';
@@ -111,6 +129,7 @@ EOREGEX
 	protected $dest = NULL;
 
 	protected $serverId = NULL;
+	protected $email_message_header = NULL;
 	
 	protected $binlogServerId=1;
 
@@ -120,11 +139,14 @@ EOREGEX
 	protected $skip_before_update = false;
 	protected $mark_updates = false;
 	
-	public  $raiseWarnings = false;
+	public    $raiseWarnings = false;
 	
-	public  $delimiter = ';';
+	public    $delimiter = ';';
 
 	protected $log_retention_interval = "10 day";
+	var       $flog;
+
+	
 	public function get_source($new = false) {
 		if($new) return $this->new_connection(SOURCE);
 		return $this->source;
@@ -141,9 +163,11 @@ EOREGEX
 		switch($connection_type) {
 			case 'source': 
 				/*TODO: support unix domain sockets */
+        $this->flog->info("Connecting to Source: ".$S['host'] . ':' . $S['port'] . " UID:" . $S['user']);
 				$handle = mysql_connect($S['host'] . ':' . $S['port'], $S['user'], $S['password'], true) or die1('Could not connect to MySQL server:' . mysql_error());
 				return $handle;
 			case 'dest':
+        $this->flog->info("Connecting to Dest: ".$D['host'] . ':' . $D['port'] . " UID:" . $D['user']);
 				$handle = mysql_connect($D['host'] . ':' . $D['port'], $D['user'], $D['password'], true) or die1('Could not connect to MySQL server:' . mysql_error());
 				return $handle;
 		}
@@ -154,16 +178,27 @@ EOREGEX
 	#By default read settings from the INI file unless they are passed
 	#into the constructor	
 	public function __construct($settings = NULL, $no_connect = false) {
-		if(!$settings) {
+
+    Logger::configure('log4php_cfg.xml');
+    $this->flog = Logger::getLogger("main");
+  	
+ 		if(!$settings) {
 			$settings = $this->read_settings();
 		}
-		$this->settings = $settings;
-		if(!$this->cmdLine) $this->cmdLine = `which mysqlbinlog`;
+		
+		#the mysqlbinlog command line location may be set in the settings
+		#we will autodetect the location if it is not specified explicitly
+		if(!empty($settings['flexcdc']['mysqlbinlog'])) {
+			$this->cmdLine = $settings['flexcdc']['mysqlbinlog'];
+		} 
+		if(isset($this->cmdLine) && !file_exists($this->cmdLine)) $this->cmdLine = false;
+		if(!$this->cmdLine) $this->cmdLine = trim(`which mysqlbinlog`);
 		if(!$this->cmdLine) {
 			die1("could not find mysqlbinlog!",2);
 		}
-		
-		
+	
+		$this->settings = $settings;
+
 		#only record changelogs from certain databases?
 		if(!empty($settings['flexcdc']['only_database'])) {
 			$vals = explode(',', $settings['flexcdc']['only_databases']);
@@ -182,15 +217,9 @@ EOREGEX
 		if(!empty($settings['flexcdc']['log_retention_interval'])) $this->log_retention_interval=$settings['flexcdc']['log_retention_interval'];
 		
 		foreach($settings['flexcdc'] as $kdisp => $vdisp) {
-			echo "{$kdisp}={$vdisp}\n";
+			$this->flog->info("{$kdisp}={$vdisp}");
 		}
 		
-		#the mysqlbinlog command line location may be set in the settings
-		#we will autodetect the location if it is not specified explicitly
-		if(!empty($settings['flexcdc']['mysqlbinlog'])) {
-			$this->cmdLine = $settings['flexcdc']['mysqlbinlog'];
-		} 
-
 		#build the command line from user, host, password, socket options in the ini file in the [source] section
 		foreach($settings['source'] as $k => $v) {
 			$this->cmdLine .= " --$k=$v";
@@ -214,9 +243,12 @@ EOREGEX
 			$this->source = $this->get_source(true);
 			$this->dest = $this->get_dest(true);
 		}
+		if(!empty($settings['flexcdc']['email_message_header'])) $this->email_message_header = $settings['flexcdc']['email_message_header'];
 
 		$this->settings = $settings;
-	    
+		
+		$this->flog->info("User: " . getenv('USER'));
+		$this->flog->info("Host: " . gethostname());
 	}
 
 	protected function initialize() {
@@ -225,7 +257,6 @@ EOREGEX
 		$this->initialize_dest();
 		$this->get_source_logs();
 		$this->cleanup_logs();
-		
 	}
 	
 	public function table_exists($schema, $table) {
@@ -240,48 +271,70 @@ EOREGEX
 		return false;
 	}
 
-	public function table_ordinal_datatype($schema,$table,$pos) {
+  # read the datatype from the flexviews table
+	public function table_ordinal_datatype($schema, $table, $pos) {
 		static $cache;
-
-		$key = $schema . $table . $pos;
-		if(!empty($cache[$key])) {
-			return $cache[$key];
-		} 
 
 		$log_name = 'mvlog_' . md5(md5($schema) . md5($table));
 		$table  = mysql_real_escape_string($table, $this->dest);
 		$pos	= mysql_real_escape_string($pos);
 
+		$key = $schema . $table . $pos;
+		if(!empty($cache[$key])) {
+		  $this->flog->trace("    Found in cache: $key:$cache[$key]");
+			return $cache[$key];
+		} 
+
 		$sql = 'select data_type from information_schema.columns where table_schema="%s" and table_name="%s" and ordinal_position="%s"';
 
 		$sql = sprintf($sql, $this->mvlogDB, $log_name, $pos+4);
 
+    $this->flog->info("    ".$sql);
 		$stmt = my_mysql_query($sql, $this->dest);
 		if($row = mysql_fetch_array($stmt) ) {
-			$cache[$key] = $row[0];	
+			$cache[$key] = $row[0];
 			return($row[0]);
 		}
 		return false;
-			
-		
 	}
 
-	public function table_ordinal_is_unsigned($schema,$table,$pos) {
+	public function table_ordinal_is_unsigned($schema, $table, $pos) {
 		/* NOTE: we look at the LOG table to see the structure, because it might be different from the source if the consumer is behind and an alter has happened on the source*/
+
+		static $sign_cache;
 
 		$log_name = 'mvlog_' . md5(md5($schema) .md5($table));
 		$table  = mysql_real_escape_string($table, $this->dest);
 		$pos	= mysql_real_escape_string($pos);
+
+		$sign_key = $schema . $table . $pos;
+		
+		if(!empty($sign_cache[$sign_key])) {
+		  $this->flog->trace("    Found in cache: $sign_key:".$sign_cache[$sign_key]);
+		  if ($sign_cache[$sign_key] == "ZERO") {
+		    return 0;
+		  } else {
+		    return 1;
+		  }
+		} 
+
 		$sql = 'select (column_type like "%%unsigned%%") as is_unsigned from information_schema.columns where table_schema="%s" and table_name="%s" and ordinal_position=%d';
 
 		$sql = sprintf($sql, $this->mvlogDB, $log_name, $pos+4);
 
+    $this->flog->trace("    ".$sql);
 		$stmt = my_mysql_query($sql, $this->dest);
 		if($row = mysql_fetch_array($stmt) ) {
+      if($row[0] == "0") {
+        $sign_cache[$sign_key] = "ZERO";
+      } else {
+        $sign_cache[$sign_key] = "NONZERO";
+      }
+      $this->flog->trace("    adding:".$row[0]." ".$sign_cache[$sign_key]);
+			
 			return($row[0]);
 		}
 		return false;
-		
 	}
 	
 	public function setup($force=false , $only_table=false) {
@@ -345,8 +398,8 @@ EOREGEX
 						 `" . $this->binlog_consumer_status . "` (
   						 	`server_id` int not null, 
   							`master_log_file` varchar(100) NOT NULL DEFAULT '',
-  							`master_log_size` int(11) DEFAULT NULL,
-  							`exec_master_log_pos` int(11) default null,
+  							`master_log_size` bigint(11) DEFAULT NULL,
+  							`exec_master_log_pos` bigint(11) default null,
   							PRIMARY KEY (`server_id`, `master_log_file`)
 						  ) ENGINE=InnoDB DEFAULT CHARSET=utf8;"
 			            , $this->dest) or die1('COULD NOT CREATE TABLE ' . $this->binlog_consumer_status . ': ' . mysql_error($this->dest) . "\n");
@@ -377,34 +430,40 @@ EOREGEX
 		my_mysql_query("commit;", $this->dest);
 		
 		return true;
-		
-			
-	}
+ }
+
 	#Capture changes from the source into the dest
+	# Primary Function called from run_consumer.php
+	# iterations = -1: run forever
 	public function capture_changes($iterations=1) {
 
-                echo1("Starting function capture_changes");
+    $this->flog->info("Starting function capture_changes");
 		$this->initialize();
 		
 		$count=0;
 		$sleep_time=0;
 
 		while($iterations <= 0 || ($iterations >0 && $count < $iterations)) {
-			$this->initialize();
+		  # check for stop file, if found, then exit 0
+
+      check_stop();
+      Logger::configure('log4php_cfg.xml');
+  		
+  		$this->initialize();
+
 			#retrieve the list of logs which have not been fully processed
 			#there won't be any logs if we just initialized the consumer above
 			$sql = "SELECT bcs.* 
-			          FROM `" . $this->mvlogDB . "`.`" . $this->binlog_consumer_status . "` bcs 
+			         FROM `" . $this->mvlogDB . "`.`" . $this->binlog_consumer_status . "` bcs 
 			         WHERE server_id=" . $this->serverId .  
-			       "   AND exec_master_log_pos < master_log_size 
+			       " AND exec_master_log_pos < master_log_size 
 			         ORDER BY master_log_file;";
 		
-                        #echo1("Query to retrieve list of unprocessed binlogs: ".$sql);	
-		
-			#echo " -- Finding binary logs to process\n";
 			$stmt = my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error() . "\n");
 			$processedLogs = 0;
-                        echo1("Inside capture_changes, before while loop");
+			
+			$processed_something=FALSE;
+      $this->flog->trace("Inside capture_changes, before binlog read loop");
 			while($row = mysql_fetch_assoc($stmt)) {
 				++$processedLogs;
 				$this->delimiter = ';';
@@ -413,7 +472,7 @@ EOREGEX
 				$execCmdLine = sprintf("%s --base64-output=decode-rows -v -R --start-position=%d --stop-position=%d %s", $this->cmdLine, $row['exec_master_log_pos'], $row['master_log_size'], $row['master_log_file']);
 				$execCmdLine .= " 2>&1";
 
-                                echo1("execCmdLine: ". $execCmdLine);
+        $this->flog->debug("execCmdLine: ". $execCmdLine);
 
 				$proc = popen($execCmdLine, "r");
 				if(!$proc) {
@@ -421,21 +480,27 @@ EOREGEX
 				}
 
 				$line = fgets($proc);
-				if(preg_match('%/mysqlbinlog:|^ERROR:%', $line)) {
+				if(preg_match('%ERROR:%', $line)) {
 					die1('Could not read binary log: ' . $line . "\n");
 				}	
 
 				$this->binlogPosition = $row['exec_master_log_pos'];
 				$this->logName = $row['master_log_file'];
 				$this->process_binlog($proc, $row['master_log_file'], $row['exec_master_log_pos'],$line);
-                                echo1("Inside capture_changes, Inside while loop, after process_binlog");
+				
+        $this->flog->trace("Inside capture_changes, Inside while loop, after process_binlog");
+        
 				$this->set_capture_pos();	
 				my_mysql_query('commit', $this->dest);
 				pclose($proc);
+				$processed_something=TRUE;
 			}
-                        echo1("Inside capture_changes, After while loop");
+      
+      if ($processed_something) $this->flog->trace("Finished processing binglog.");
+      $this->flog->trace("Inside capture_changes, After binlog read loop");
 
-			if($processedLogs) ++$count;
+      # if you processed something above, then increment counter
+			if($processedLogs > 0) ++$count; else sleep(1);
 
 			#we back off further each time up to maximum
 			if(!empty($this->settings['flexcdc']['sleep_increment']) && !empty($this->settings['flexcdc']['sleep_maximum'])) {
@@ -444,14 +509,14 @@ EOREGEX
 				} else {
 					$sleep_time += $this->settings['flexcdc']['sleep_increment'];
 					$sleep_time = $sleep_time > $this->settings['flexcdc']['sleep_maximum'] ? $this->settings['flexcdc']['sleep_maximum'] : $sleep_time;
-					echo1('sleeping:' . $sleep_time );
+					$this->flog->info('  Pause before checking for binlog udpates. Sleep: ' . $sleep_time . " seconds." );
 					sleep($sleep_time);
 				}
 			}
 
 		}
-		return $processedLogs;
 
+		return $processedLogs;
 	}
 	
 	protected function read_settings() {
@@ -467,18 +532,19 @@ EOREGEX
 			die1("Could not find [flexcdc] section or .ini file not found");
 		}
 
-    echo "Reading settings"."\n";
+    $this->flog->info("Reading settings");
 
 		return $settings;
 	}
-
 	
 	protected function refresh_mvlog_cache() {
 		
+    $this->flog->trace("  Inside refresh_mvlog_cache: ");
+
 		$this->mvlogList = array();
 			
 		$sql = "SELECT table_schema, table_name, mvlog_name from `" . $this->mvlogs . "` where active_flag=1";
-                echo1("Inside refresh_mvlog_cache: ".$sql);
+    
 		$stmt = my_mysql_query($sql, $this->dest);
 		while($row = mysql_fetch_array($stmt)) {
 			$this->mvlogList[$row[0] . $row[1]] = $row[2];
@@ -488,6 +554,7 @@ EOREGEX
 	/* Set up the destination connection */
 	function initialize_dest() {
 		#my_mysql_query("SELECT GET_LOCK('flexcdc::SOURCE_LOCK::" . $this->server_id . "',15)") or die1("COULD NOT OBTAIN LOCK\n");
+		
 		mysql_select_db($this->mvlogDB) or die1('COULD NOT CHANGE DATABASE TO:' . $this->mvlogDB . "\n");
 		my_mysql_query("commit;", $this->dest);
 		$stmt = my_mysql_query("SET SQL_MODE=STRICT_ALL_TABLES");
@@ -498,19 +565,17 @@ EOREGEX
 		$stmt = my_mysql_query("select @@max_allowed_packet", $this->dest);
 		$row = mysql_fetch_array($stmt);
 		$this->max_allowed_packet = $row[0];	
+		#$this->flog->info("Max_allowed_packet: " . $this->max_allowed_packet . "\n");
 
 		$stmt = my_mysql_query("select gsn_hwm from {$this->mvlogDB}.{$this->mview_uow} order by uow_id desc limit 1",$this->dest) 
 			or die('COULD NOT GET GSN_HWM:' . mysql_error($this->dest) . "\n");
 
 		$row = mysql_fetch_array($stmt);
 		$this->gsn_hwm = $row[0];
-
-		#echo1("Max_allowed_packet: " . $this->max_allowed_packet . "\n");
-		
 	}
 	
-	/* Get the list of logs from the source and place them into a temporary table on the dest*/
-	
+	/* Get the list of logs from the source and place them into a temporary table on the dest
+	    if already there, then update the current bin_log_pos for the source log */
 	function get_source_logs() {
 		/* This server id is not related to the server_id in the log.  It refers to the ID of the 
 		 * machine we are reading logs from.
@@ -552,7 +617,6 @@ EOREGEX
 
 		$sql = "DROP TEMPORARY table IF EXISTS log_list";
 		my_mysql_query($sql, $this->dest) or die1("Could not drop TEMPORARY TABLE log_list\n");
-		
 	}
 
 	function purge_table_change_history() {
@@ -599,57 +663,52 @@ EOREGEX
 	function set_capture_pos() {
 		$sql = sprintf("UPDATE `" . $this->mvlogDB . "`.`" . $this->binlog_consumer_status . "` set exec_master_log_pos = %d where master_log_file = '%s' and server_id = %d", $this->binlogPosition, $this->logName, $this->serverId);
 
-                echo1("Updating binlog_consumer_status ".$sql);
-		
 		my_mysql_query($sql, $this->dest) or die1("COULD NOT EXEC:\n$sql\n" . mysql_error($this->dest));
-		
 	}
 
 	/* Called when a new transaction starts*/
 	function start_transaction() {
 		my_mysql_query("START TRANSACTION", $this->dest) or die1("COULD NOT START TRANSACTION;\n" . mysql_error());
-        	$this->set_capture_pos();
+    $this->set_capture_pos();
 		$sql = sprintf("INSERT INTO `" . $this->mview_uow . "` values(NULL,str_to_date('%s', '%%y%%m%%d %%H:%%i:%%s'),%d);",rtrim($this->timeStamp),$this->gsn_hwm);
-                echo1("Inside start_transaction, sql1: ".$sql);
+    
 		my_mysql_query($sql,$this->dest) or die1("COULD NOT CREATE NEW UNIT OF WORK:\n$sql\n" .  mysql_error());
 		 
 		$sql = "SET @fv_uow_id := LAST_INSERT_ID();";
-                echo1("Inside start_transaction, sql2: ".$sql);
+		
 		my_mysql_query($sql, $this->dest) or die1("COULD NOT EXEC:\n$sql\n" . mysql_error($this->dest));
-
 	}
-
     
-    /* Called when a transaction commits */
+  /* Called when a transaction commits */
 	function commit_transaction() {
 
-	        echo1("Starting commit_transaction");
+	  $this->flog->trace("Starting commit_transaction");
 
 		//Handle bulk insertion of changes
 		if(!empty($this->inserts) || !empty($this->deletes)) {
-	                echo1("Inside commit_transaction, before process_rows ");
 			$this->process_rows();
 		}
 		$this->inserts = $this->deletes = $this->tables = array();
                 
-                echo1("Inside commit_transaction, before set_capture_pos");
 		$this->set_capture_pos();
 		$sql = "UPDATE `{$this->mvlogDB}`.`{$this->mview_uow}` SET `commit_time`=str_to_date('%s','%%y%%m%%d %%H:%%i:%%s'), `gsn_hwm` = %d WHERE `uow_id` = @fv_uow_id";
 		$sql = sprintf($sql, rtrim($this->timeStamp),$this->gsn_hwm);
-                echo1("Inside commit_transaction, sql: ".$sql);
+		
 		my_mysql_query($sql, $this->dest) or die('COULD NOT UPDATE ' . $this->mvlogDB . "." . $this->mview_uow . ':' . mysql_error($this->dest) . "\n");
 		my_mysql_query("COMMIT", $this->dest) or die1("COULD NOT COMMIT TRANSACTION;\n" . mysql_error());
 	}
 
 	/* Called when a transaction rolls back */
 	function rollback_transaction() {
-                echo1("Inside rollback_transaction");
+	
+    $this->flog->trace("Inside rollback_transaction");
+    
 		$this->inserts = $this->deletes = $this->tables = array();
 		my_mysql_query("ROLLBACK", $this->dest) or die1("COULD NOT ROLLBACK TRANSACTION;\n" . mysql_error());
+		
 		#update the capture position and commit, because we don't want to keep reading a truncated log
 		$this->set_capture_pos();
 		my_mysql_query("COMMIT", $this->dest) or die1("COULD NOT COMMIT TRANSACTION LOG POSITION UPDATE;\n" . mysql_error());
-		
 	}
 
 	/* Called when a row is deleted, or for the old image of an UPDATE */
@@ -662,6 +721,7 @@ EOREGEX
 			$this->row['fv$gsn'] = $this->gsn_hwm;
 			$this->row['fv$DML'] = $this->DML;
 			$this->deletes[$key][] = $this->row;
+      $this->flog->info("    Adding Delete(".$this->DML.") for: ".$this->db.".".$this->base_table);
 			if(count($this->deletes[$key]) >= 10000) {
 				$this->process_rows();	
 			}
@@ -695,6 +755,7 @@ EOREGEX
 			$this->row['fv$gsn'] = $this->gsn_hwm;
 			$this->row['fv$DML'] = $this->DML;
 			$this->inserts[$key][] = $this->row;
+      $this->flog->info("    Adding Insert(".$this->DML.") for: ".$this->db.".".$this->base_table);
 			if(count($this->inserts[$key]) >= 10000) {
 				$this->process_rows();	
 			}
@@ -719,9 +780,10 @@ EOREGEX
 	}
 
 	function process_rows() {
-		echo1("Starting function process_rows");
+		$this->flog->info("Process Row Data:");
+		
 		$i = 0;
-                $num_updates = 0;
+    $num_updates = 0;
 		
 		while($i<2) {
 			$valList =  "";
@@ -735,6 +797,7 @@ EOREGEX
   		$origmode = $mode;
 			$tables = array_keys($data);
 			foreach($tables as $table) {
+			  $this->flog->info("  Table: ".$table);
 				$rows = $data[$table];	
 				
 				$sql = sprintf("INSERT INTO %s VALUES ", $table);
@@ -750,6 +813,8 @@ EOREGEX
 							$col = "'" . mysql_real_escape_string(trim($col,"'")) . "'";
 							
 						}
+						$this->flog->info("  Col #: $pos  Col: $col");
+
 						$datatype = $this->table_ordinal_datatype($this->tables[$table]['schema'],$this->tables[$table]['table'],$pos+1);
 						if(strtoupper($col) === "NULL") $datatype="NULL";
 						switch(trim($datatype)) {
@@ -801,9 +866,8 @@ EOREGEX
 					if($valList) $valList .= ",\n";	
 
   				if( $DML == "UPDATE" && $this->mark_updates ) {
-				  echo1("Inside function process_rows, inside UPDATE");
-			          $num_updates++;
-				  echo1("Inside function process_rows, num_updates: ".$num_updates);
+			      $num_updates++;
+				    $this->flog->trace("Inside function process_rows, num_updates: ".$num_updates);
   				  if( $mode==1 ) {
   				    $mode=2;
   				  } elseif( $mode==-1 ) {
@@ -814,7 +878,7 @@ EOREGEX
 				$bytes = strlen($valList) + strlen($sql);
 				$allowed = floor($this->max_allowed_packet * .9);  #allowed len is 90% of max_allowed_packet	
 				if(($bytes > $allowed) || ($num_updates >= 100)) {
-				    echo1("Inside function process_rows, after bytes allowed, sql: ".$sql);
+				    $this->flog->trace("Inside function process_rows, after bytes allowed, sql: ".$sql);
 				    my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 				    $valList = "";
 				    $num_updates = 0;
@@ -842,9 +906,10 @@ EOREGEX
 	 */	
 	function statement($sql) {
 
-                echo1("Inside function statement");
-
 		$sql = trim($sql);
+
+    $this->flog->trace("    Process statement: ".$sql);
+
 		#TODO: Not sure  if this might be important..
 		#      In general, I think we need to worry about character
 		#      set way more than we do (which is not at all)
@@ -865,19 +930,22 @@ EOREGEX
 		$command = str_replace($this->delimiter,'', $command);
 		$args = $matches[2];
 
-                echo1("Inside function statement, before switch, command: ".$command);
+    $this->flog->trace("      Command: ".$command);
 	
 		switch(strtoupper($command)) {
 			#register change in delimiter so that we properly capture statements
 			case 'DELIMITER':
+			  $this->flog->trace("      Reset Delimeter: ".trim($args));
 				$this->delimiter = trim($args);
 				break;
 				
 			#ignore SET and USE for now.  I don't think we need it for anything.
 			case 'SET':
+			  $this->flog->trace("      Ignored.");
 				break;
 
 			case 'USE':
+			  $this->flog->trace("      Change Active DB");
 				$this->activeDB = trim($args);	
 				$this->activeDB = str_replace($this->delimiter,'', $this->activeDB);
 				break;
@@ -893,12 +961,12 @@ EOREGEX
 				break;
 				
 			case 'COMMIT':
-		                echo1("Inside function statement, inside switch, inside COMMIT");
 				$this->commit_transaction();
 				break;
 				
 			#Might be interestested in CREATE statements at some point, but not right now.
 			case 'CREATE':
+			  $this->flog->trace("      Ignored.");
 				break;
 				
 			#DML IS BAD....... :(
@@ -907,12 +975,16 @@ EOREGEX
 			case 'DELETE':
 			case 'REPLACE':
 			case 'TRUNCATE':
+				$this->flog->trace("      Ignored.");
 				/* TODO: If the table is not being logged, ignore DML on it... */
 				if($this->raiseWarnings) trigger_error('Detected statement DML on a table!  Changes can not be tracked!' , E_USER_WARNING);
 				break;
 
 			case 'RENAME':
-				
+
+				if($this->raiseWarnings) trigger_error('Detected RENAME on a table!  '.$sql, E_USER_WARNING);
+				break;
+				/*
 				#TODO: Find some way to make atomic rename atomic.  split it up for now
 				$tokens = FlexCDC::split_sql($sql);
 				
@@ -971,7 +1043,7 @@ EOREGEX
 					my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
 					
 					$sql = 'RENAME TABLE ' . $clause;
-					@my_mysql_query($sql, $this->dest) or die1('DURING RENAME:\n' . $new_sql . "\n" . mysql_error($this->dest) . "\n");
+					my_mysql_query($sql, $this->dest) or die1('DURING RENAME:\n' . $new_sql . "\n" . mysql_error($this->dest) . "\n");
 					my_mysql_query('commit', $this->dest);					
 				
 					$this->mvlogList = array();
@@ -980,11 +1052,13 @@ EOREGEX
 				}
 						
 				break;
-
+        */
+        
 			case 'ALTER':
-                                echo1("ALTER DDL found");
+			  $this->flog->info("      Processing ALTER.");
+			
 				$tokens = FlexCDC::split_sql($sql);
-                                echo1("tokens: ".$tokens);
+        $this->flog->info("tokens: ".$tokens);
 				$is_alter_table = -1;
 				foreach($tokens as $key => $token) {
 					if(strtoupper($token) == 'TABLE') {
@@ -1026,7 +1100,6 @@ EOREGEX
 						}		
 					}	
 					$clauses[] = $clause;
-					
 					
 					$new_clauses = "";
 					$new_log_table="";
@@ -1092,13 +1165,13 @@ EOREGEX
 				/* TODO: If the table is not being logged, ignore DROP on it.  
 				 *       If it is being logged then drop the log and maybe any materialized views that use the table.. 
 				 *       Maybe throw an errro if there are materialized views that use a table which is dropped... (TBD)*/
-				if($this->raiseWarnings) trigger_error('Detected DROP on a table!  This may break CDC, particularly if the table is recreated with a different structure.' , E_USER_WARNING);
+				if($this->raiseWarnings) trigger_error('Detected DROP on a table!  '.$sql , E_USER_WARNING);
 				break;
 				
 			#I might have missed something important.  Catch it.	
 			#Maybe this should be E_USER_ERROR
 			default:
-				#if($this->raiseWarnings) trigger_error('Unknown command: ' . $command, E_USER_WARNING);
+				$this->flog->info("      Unknown Command: " . $command);
 				if($this->raiseWarnings) trigger_error('Unknown command: ' . $command, E_USER_WARNING);
 				break;
 		}
@@ -1113,7 +1186,8 @@ EOREGEX
 	} 
 	
 	function process_binlog($proc, $lastLine="") {
-                echo1("Starting process_binlog ...");
+    $this->flog->info("Starting process_binlog ...");
+    
 		$binlogStatement="";
 		$this->timeStamp = false;
 
@@ -1125,7 +1199,9 @@ EOREGEX
 		#in another procedure which also reads from $proc, and we
 		#can't seek backwards, so this function returns the next line to process
 		#In this case we use that line instead of reading from the file again
+		
 		$this->current_dml = null;
+		
 		while( !feof($proc) || $lastLine !== '') {
 
 			if($lastLine) {
@@ -1137,21 +1213,19 @@ EOREGEX
 				$line = trim(fgets($proc));
 			}
 
-                        echo1("Inside process_binlog, line: ".$line);
-
-			#echo "-- $line\n";
 			#It is faster to check substr of the line than to run regex
 			#on each line.
 			$prefix=substr($line, 0, 5);
 			if($prefix=="ERROR") {
 				if(preg_match('/Got error/', $line)) 
+          sleep(1);
 				die1("error from mysqlbinlog: $line");
 			}
 			$matches = array();
 
 			#Control information from MySQLbinlog is prefixed with a hash comment.
 			if($prefix[0] == "#") {
-                        echo1("Inside process_binlog, control info section");
+        $this->flog->trace("    control info: ".$line);
 				$binlogStatement = "";
 				if (preg_match('/^#([0-9]+\s+[0-9:]+)\s+server\s+id\s+([0-9]+)\s+end_log_pos ([0-9]+).*/', $line,$matches)) {
 					$this->timeStamp = $matches[1];
@@ -1165,6 +1239,7 @@ EOREGEX
 							$this->DML = $matches[1];
 							$this->db          = trim($matches[2],'`');
 							$this->base_table  = trim($matches[3],'`');
+              $this->flog->info("  Data Stmt: ".$this->DML." ".$this->db.".".$this->base_table);
 
 							if($this->db == $this->mvlogDB && $this->base_table == $this->mvlogs) {
 								$this->refresh_mvlog_cache();
@@ -1179,38 +1254,38 @@ EOREGEX
 								$this->mvlog_table = $this->mvlogList[$this->db . $this->base_table];
 								$lastLine = $this->process_rowlog($proc, $line);
 							}
-
-							
 						}
 					} 
 				}
 		 
 			}	else {
-                           echo1("Inside process_binlog, else  section");
+        $this->flog->trace("  Line: ".$line);
 				
+				# if empty, then prime with a space
 				if($binlogStatement) {
 					$binlogStatement .= " ";
 				}
-                                echo1("Inside process_binlog, binlogStatement1: ".$binlogStatement);
+        
 				$binlogStatement .= $line;
-                                echo1("Inside process_binlog, binlogStatement2: ".$binlogStatement);
+
+        $this->flog->trace("    curr stmt: ".$binlogStatement);
+				
 				$pos=false;				
 				if(($pos = strpos($binlogStatement, $this->delimiter)) !== false)  {
-                                        echo1("Inside process_binlog, inside last if");
+          $this->flog->trace("    found delimiter.");
+					
 					#process statement
 					$this->statement($binlogStatement);
-					echo1("Inside process_binlog, after this: ");
 					$binlogStatement = "";
 				} 
 			}
 		}
 
-	    echo1("Finishing  process_binlog");
+	  $this->flog->info("  Finishing process_binlog");
 	}
 	
-	
 	function process_rowlog($proc) {
-                echo1("Starting process_rowlog... ");
+    $this->flog->info("Starting process_rowlog... ");
 
 		$sql = "";
 		$skip_rows = false;
@@ -1227,6 +1302,7 @@ EOREGEX
 		
 		while($line = fgets($proc)) {
 			$line = trim($line);	
+			$this->flog->info("  Line: ".$line);
       #DELETE and UPDATE statements contain a WHERE clause with the OLD row image
 			if($line == "### WHERE") {
 				if(!empty($this->row)) {
@@ -1271,7 +1347,7 @@ EOREGEX
 
 			#This line does not start with ### so we are at the end of the images	
 			} else {
-				#echo ":: $line\n";
+				#$this->flog->debug(":: $line");
 				if(!$skip_rows) {
 					switch($mode) {
 						case -1:
@@ -1291,7 +1367,8 @@ EOREGEX
 		}
 		#return the last line so that we can process it in the parent body
 		#you can't seek backwards in a proc stream...
-                echo1("Finishing process_rowlog: ".$line);
+    
+    $this->flog->info("Finishing process_rowlog: ".$line);
 		return $line;
 	}
 
@@ -1300,15 +1377,16 @@ EOREGEX
 		#will implicit commit	
 		$sql = "DROP TABLE IF EXISTS " . $this->mvlogDB . "." . "`%s_%s`";	
 		$sql = sprintf($sql, mysql_real_escape_string($schema), mysql_real_escape_string($table));
+		$this->flog->debug($sql);
 		if(!my_mysql_query($sql)) return false;
 
 		my_mysql_query("BEGIN", $this->dest);
 		$sql = "DELETE FROM " . $this->mvlogDB . ". " . $this->mvlogs . " where table_schema = '%s' and table_name = '%s'";	
 		$sql = sprintf($sql, mysql_real_escape_string($schema), mysql_real_escape_string($table));
+		$this->flog->debug($sql);
 		if(!my_mysql_query($sql)) return false;
 
 		return my_mysql_query('commit');
-
 	}
 
 	#AUTOPORTED FROM FLEXVIEWS.CREATE_MVLOG() w/ minor modifications for PHP
@@ -1361,6 +1439,7 @@ EOREGEX
 		$create_stmt = my_mysql_query($v_sql, $this->dest);
 		if(!$create_stmt) die1('COULD NOT CREATE MVLOG. ' . $v_sql . "\n");
 		$exec_sql = " INSERT IGNORE INTO `". $this->mvlogDB . "`.`" . $this->mvlogs . "`( table_schema , table_name , mvlog_name ) values('$v_schema_name', '$v_table_name', '" . $base_mv_logname . "')";
+    $this->flog->debug($exec_sql);
 		my_mysql_query($exec_sql) or die1($exec_sql . ':' . mysql_error($this->dest) . "\n");
 
 		return true;

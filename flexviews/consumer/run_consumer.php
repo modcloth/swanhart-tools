@@ -3,17 +3,16 @@ ini_set('output_buffering',false);
 if (is_resource(STDIN)) fclose(STDIN);
 require_once('include/flexcdc.php');
 require_once('Console/Getopt.php');
+require_once 'log4php/Logger.php';
+Logger::configure('log4php_cfg.xml');
+$logger = Logger::getLogger("main");
 declare(ticks = 1);
 
-$HOME=getenv("HOME");
-echo 'HOME: '.$HOME."\n";
+$current_date = date('Y-m-d H:i:s');
+$logger->info("Starting run_consumer.php");
 
-$ERROR_FILE=false;
-$current_date = date('Ymd_His');
-$ERROR_FILE=$HOME.'/flex_cdc_logs/flexcdc_'.$current_date.'.log';
-echo 'ERROR_FILE: '.$ERROR_FILE."\n";
-$ERROR_FILE = fopen($ERROR_FILE, 'w') or die1("could not open the error log for writing");
-echo1('Starting run_consumer.php');
+$HOME=getenv("HOME");
+$logger->info('HOME: '.$HOME);
 
 if (function_exists('pcntl_signal')) {
 	pcntl_signal(SIGTERM, "sig_handler");
@@ -38,26 +37,26 @@ function sig_handler($signo)
 
 function &get_commandline() {
 
-        $cg = new Console_Getopt();
-        $args = $cg->readPHPArgv();
-        array_shift($args);
+  $cg = new Console_Getopt();
+  $args = $cg->readPHPArgv();
+  array_shift($args);
 
-        $shortOpts = 'h::v::';
-        $longOpts  = array('ini=', 'help==', 'pid=', 'daemon==' );
+  $shortOpts = 'h::v::';
+  $longOpts  = array('ini=', 'help==', 'pid=', 'daemon==' );
 
-        $params = $cg->getopt2($args, $shortOpts, $longOpts);
-        if (PEAR::isError($params)) {
-            echo 'Error: ' . $params->getMessage() . "\n";
-            exit(1);
-        }
-        $new_params = array();
-        foreach ($params[0] as $param) {
-                $param[0] = str_replace('--','', $param[0]);
-                $new_params[$param[0]] = $param[1];
-        }
-        unset($params);
+  $params = $cg->getopt2($args, $shortOpts, $longOpts);
+  if (PEAR::isError($params)) {
+      $logger->fatal('Error: ' . $params->getMessage());
+      exit(1);
+  }
+  $new_params = array();
+  foreach ($params[0] as $param) {
+          $param[0] = str_replace('--','', $param[0]);
+          $new_params[$param[0]] = $param[1];
+  }
+  unset($params);
 
-        return $new_params;
+  return $new_params;
 }
 
 $params = get_commandline();
@@ -67,10 +66,6 @@ $settings = false;
 if(!empty($params['ini'])) {
 	$settings = @parse_ini_file($params['ini'], true);
 }
-
-echo "I'm here"."\n";
-#if(!empty($settings['flexcdc']['error_log'])) $ERROR_FILE=$settings['flexcdc']['error_log']; else $ERROR_FILE="flexcdc.err2";		
-#$ERROR_FILE = fopen($ERROR_FILE, 'w') or die1("could not open the error log for writing");
 
 if(in_array('daemon', array_keys($params))) {
 	if (is_resource(STDERR)) fclose(STDERR);
@@ -98,19 +93,13 @@ if(!empty($params['pid'])) {
 		$ps = `ps -p$pid`;
 
 		if(preg_match('/php/i',$ps)) {
-			echo("Already running!\n");
+			$logger->info("Already running!");
 			exit(1000);
 		} else {
-			echo "Stale lockfile detected.\n";
+			$logger->info("Stale lockfile detected.");
 		}
 	}
 	file_put_contents($params['pid'], getmypid());
-}
-
-if(empty($settings['flexcdc']['error_log'])) {
-	$error_log = "flexcdc.err";  
-} else {
-	$error_log = $settings['flexcdc']['error_log'];
 }
 
 $cdc = new FlexCDC($settings);
