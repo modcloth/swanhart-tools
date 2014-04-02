@@ -29,6 +29,8 @@ define('DEST', 'dest');
 $debug_level = 0;
 global $logger;
 global $email_message_header;
+global $email_address;
+
 $logger = Logger::getLogger("main");
 $logger->info("Starting flexcdc.php");
 
@@ -48,7 +50,12 @@ function die1($error = 1,$error2=1) {
 
 function send_email($message) {
   global $email_message_header;
-  mail('r.birch@modcloth.com', "[".$email_message_header."] FlexCDC Message", $message);
+  global $email_address;
+  global $logger;  
+  
+  $logger->debug("Email - add: " . $email_address . " head: " . $email_message_header . " msg: " . $message);
+  
+  mail($email_address, "[".$email_message_header."] FlexCDC Message", $message);
 }
 
 function check_stop() {
@@ -62,9 +69,14 @@ function check_stop() {
   }
 }
 
-function my_mysql_query($a, $b=NULL) {
+function my_mysql_query($a, $b=NULL, $force_log=FALSE) {
   global $logger;
-  $logger->debug("$a");
+  
+  if ($force_log) {
+    $logger->info(substr($a, 0, 500000));
+  } else {
+    $logger->trace(substr($a, 0, 500000));
+  }
 
 	if($b) {
 	  $r = mysql_query($a, $b);
@@ -73,10 +85,11 @@ function my_mysql_query($a, $b=NULL) {
 	}
 
 	if(!$r) {
-		$logger->fatal("SQL_ERROR IN STATEMENT:\n$a\n");
+		$logger->fatal("SQL_ERROR");
     $pr = mysql_error();
-    $logger->fatal(print_r(debug_backtrace(),true));
     $logger->fatal($pr);
+		$logger->fatal("    STATEMENT:\n".substr($a, 0, 500000));
+    $logger->fatal(substr(print_r(debug_backtrace(),true), 0, 500000));
 	}
 
 	return $r;
@@ -129,7 +142,6 @@ EOREGEX
 	protected $dest = NULL;
 
 	protected $serverId = NULL;
-	protected $email_message_header = NULL;
 	
 	protected $binlogServerId=1;
 
@@ -138,10 +150,14 @@ EOREGEX
 
 	protected $skip_before_update = false;
 	protected $mark_updates = false;
+	protected $max_allowed_packet = 0;
+	protected $die_on_alter = 0;
+	protected $skip_alter = 0;
 	
 	public    $raiseWarnings = false;
 	
 	public    $delimiter = ';';
+	
 
 	protected $log_retention_interval = "10 day";
 	var       $flog;
@@ -215,6 +231,8 @@ EOREGEX
 		if(!empty($settings['flexcdc']['mview_uow'])) $this->mview_uow=$settings['flexcdc']['mview_uow'];
 
 		if(!empty($settings['flexcdc']['log_retention_interval'])) $this->log_retention_interval=$settings['flexcdc']['log_retention_interval'];
+		if(!empty($settings['flexcdc']['die_on_alter'])) $this->die_on_alter = $settings['flexcdc']['die_on_alter'];
+		if(!empty($settings['flexcdc']['skip_alter'])) $this->skip_alter = $settings['flexcdc']['skip_alter'];
 		
 		foreach($settings['flexcdc'] as $kdisp => $vdisp) {
 			$this->flog->info("{$kdisp}={$vdisp}");
@@ -243,7 +261,13 @@ EOREGEX
 			$this->source = $this->get_source(true);
 			$this->dest = $this->get_dest(true);
 		}
-		if(!empty($settings['flexcdc']['email_message_header'])) $this->email_message_header = $settings['flexcdc']['email_message_header'];
+
+    # global values
+    global $email_message_header;
+    global $email_address;
+
+		if(!empty($settings['flexcdc']['email_message_header'])) $email_message_header = $settings['flexcdc']['email_message_header'];
+		if(!empty($settings['flexcdc']['failure_email_address'])) $email_address = $settings['flexcdc']['failure_email_address'];
 
 		$this->settings = $settings;
 		
@@ -289,7 +313,7 @@ EOREGEX
 
 		$sql = sprintf($sql, $this->mvlogDB, $log_name, $pos+4);
 
-    $this->flog->info("    ".$sql);
+    $this->flog->trace("    ".$sql);
 		$stmt = my_mysql_query($sql, $this->dest);
 		if($row = mysql_fetch_array($stmt) ) {
 			$cache[$key] = $row[0];
@@ -403,7 +427,6 @@ EOREGEX
   							PRIMARY KEY (`server_id`, `master_log_file`)
 						  ) ENGINE=InnoDB DEFAULT CHARSET=utf8;"
 			            , $this->dest) or die1('COULD NOT CREATE TABLE ' . $this->binlog_consumer_status . ': ' . mysql_error($this->dest) . "\n");
-			
 		
 			#find the current master position
 			$stmt = my_mysql_query('FLUSH TABLES WITH READ LOCK', $this->source) or die1(mysql_error($this->source));
@@ -437,7 +460,7 @@ EOREGEX
 	# iterations = -1: run forever
 	public function capture_changes($iterations=1) {
 
-    $this->flog->info("Starting function capture_changes");
+    $this->flog->debug("Starting function capture_changes");
 		$this->initialize();
 		
 		$count=0;
@@ -465,6 +488,7 @@ EOREGEX
 			$processed_something=FALSE;
       $this->flog->trace("Inside capture_changes, before binlog read loop");
 			while($row = mysql_fetch_assoc($stmt)) {
+        $this->flog->info(" Reading binlog: ". $row['master_log_file']);
 				++$processedLogs;
 				$this->delimiter = ';';
 	
@@ -509,13 +533,11 @@ EOREGEX
 				} else {
 					$sleep_time += $this->settings['flexcdc']['sleep_increment'];
 					$sleep_time = $sleep_time > $this->settings['flexcdc']['sleep_maximum'] ? $this->settings['flexcdc']['sleep_maximum'] : $sleep_time;
-					$this->flog->info('  Pause before checking for binlog udpates. Sleep: ' . $sleep_time . " seconds." );
+					$this->flog->info('Pause read of binlog. Sleep: ' . $sleep_time . " seconds." );
 					sleep($sleep_time);
 				}
 			}
-
 		}
-
 		return $processedLogs;
 	}
 	
@@ -539,11 +561,11 @@ EOREGEX
 	
 	protected function refresh_mvlog_cache() {
 		
-    $this->flog->trace("  Inside refresh_mvlog_cache: ");
+    $this->flog->info("  Inside refresh_mvlog_cache: ");
 
 		$this->mvlogList = array();
 			
-		$sql = "SELECT table_schema, table_name, mvlog_name from `" . $this->mvlogs . "` where active_flag=1";
+		$sql = "SELECT table_schema, table_name, mvlog_name from `" . $this->mvlogs . "` where active_flag = 1 and table_name not in ('mview_signal')";
     
 		$stmt = my_mysql_query($sql, $this->dest);
 		while($row = mysql_fetch_array($stmt)) {
@@ -553,6 +575,7 @@ EOREGEX
 	
 	/* Set up the destination connection */
 	function initialize_dest() {
+	  $this->flog->debug("initialize_dest");
 		#my_mysql_query("SELECT GET_LOCK('flexcdc::SOURCE_LOCK::" . $this->server_id . "',15)") or die1("COULD NOT OBTAIN LOCK\n");
 		
 		mysql_select_db($this->mvlogDB) or die1('COULD NOT CHANGE DATABASE TO:' . $this->mvlogDB . "\n");
@@ -562,10 +585,12 @@ EOREGEX
 		if(!$stmt) die1(mysql_error());
 		my_mysql_query("BEGIN;", $this->dest) or die1(mysql_error());
 
-		$stmt = my_mysql_query("select @@max_allowed_packet", $this->dest);
-		$row = mysql_fetch_array($stmt);
-		$this->max_allowed_packet = $row[0];	
-		#$this->flog->info("Max_allowed_packet: " . $this->max_allowed_packet . "\n");
+    if ($this->max_allowed_packet == 0) {
+  		$stmt = my_mysql_query("select @@max_allowed_packet", $this->dest);
+  		$row = mysql_fetch_array($stmt);
+  		$this->max_allowed_packet = $row[0];	
+  		$this->flog->info("Max_allowed_packet: " . $this->max_allowed_packet);
+  	}
 
 		$stmt = my_mysql_query("select gsn_hwm from {$this->mvlogDB}.{$this->mview_uow} order by uow_id desc limit 1",$this->dest) 
 			or die('COULD NOT GET GSN_HWM:' . mysql_error($this->dest) . "\n");
@@ -577,6 +602,7 @@ EOREGEX
 	/* Get the list of logs from the source and place them into a temporary table on the dest
 	    if already there, then update the current bin_log_pos for the source log */
 	function get_source_logs() {
+	  $this->flog->debug("get_source_logs");
 		/* This server id is not related to the server_id in the log.  It refers to the ID of the 
 		 * machine we are reading logs from.
 		 */
@@ -682,7 +708,7 @@ EOREGEX
   /* Called when a transaction commits */
 	function commit_transaction() {
 
-	  $this->flog->trace("Starting commit_transaction");
+	  $this->flog->info("Starting commit_transaction");
 
 		//Handle bulk insertion of changes
 		if(!empty($this->inserts) || !empty($this->deletes)) {
@@ -701,7 +727,7 @@ EOREGEX
 	/* Called when a transaction rolls back */
 	function rollback_transaction() {
 	
-    $this->flog->trace("Inside rollback_transaction");
+    $this->flog->info("Inside rollback_transaction");
     
 		$this->inserts = $this->deletes = $this->tables = array();
 		my_mysql_query("ROLLBACK", $this->dest) or die1("COULD NOT ROLLBACK TRANSACTION;\n" . mysql_error());
@@ -721,7 +747,7 @@ EOREGEX
 			$this->row['fv$gsn'] = $this->gsn_hwm;
 			$this->row['fv$DML'] = $this->DML;
 			$this->deletes[$key][] = $this->row;
-      $this->flog->info("    Adding Delete(".$this->DML.") for: ".$this->db.".".$this->base_table);
+      $this->flog->debug("    Adding Delete(".$this->DML.") for: ".$this->db.".".$this->base_table);
 			if(count($this->deletes[$key]) >= 10000) {
 				$this->process_rows();	
 			}
@@ -741,7 +767,7 @@ EOREGEX
       }
 			$valList = "({$this->dml_type}, @fv_uow_id, {$this->binlogServerId},{$this->gsn_hwm}," . implode(",", $row) . ")";
 			$sql = sprintf("INSERT INTO `%s`.`%s` VALUES %s", $this->mvlogDB, $this->mvlog_table, $valList );
-			my_mysql_query($sql, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+			my_mysql_query($sql, $this->dest, TRUE) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 		}
 	}
 
@@ -755,7 +781,7 @@ EOREGEX
 			$this->row['fv$gsn'] = $this->gsn_hwm;
 			$this->row['fv$DML'] = $this->DML;
 			$this->inserts[$key][] = $this->row;
-      $this->flog->info("    Adding Insert(".$this->DML.") for: ".$this->db.".".$this->base_table);
+      $this->flog->debug("    Adding Insert(".$this->DML.") for: ".$this->db.".".$this->base_table);
 			if(count($this->inserts[$key]) >= 10000) {
 				$this->process_rows();	
 			}
@@ -775,16 +801,15 @@ EOREGEX
       }
 			$valList = "({$this->dml_type}, @fv_uow_id, $this->binlogServerId,{$this->gsn_hwm}," . implode(",", $row) . ")";
 			$sql = sprintf("INSERT INTO `%s`.`%s` VALUES %s", $this->mvlogDB, $this->mvlog_table, $valList );
-			my_mysql_query($sql, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+			my_mysql_query($sql, $this->dest, TRUE) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 		}
 	}
 
 	function process_rows() {
-		$this->flog->info("Process Row Data:");
-		
 		$i = 0;
-    $num_updates = 0;
-		
+    $num_rows = 0;
+		$allowed = floor($this->max_allowed_packet * .9);  #allowed len is 90% of max_allowed_packet	
+
 		while($i<2) {
 			$valList =  "";
 			if ($i==0) {
@@ -797,11 +822,14 @@ EOREGEX
   		$origmode = $mode;
 			$tables = array_keys($data);
 			foreach($tables as $table) {
-			  $this->flog->info("  Table: ".$table);
 				$rows = $data[$table];	
+			  $this->flog->info("  Table: ".$table);
+				$row_count = count($rows);
 				
 				$sql = sprintf("INSERT INTO %s VALUES ", $table);
 				foreach($rows as $the_row) {	
+					$num_rows++;
+				  $this->flog->debug("    building row " . $num_rows . " of " . $row_count);
 					$row = array();
 					$gsn = $the_row['fv$gsn'];
 					$DML = $the_row['fv$DML'];
@@ -813,7 +841,7 @@ EOREGEX
 							$col = "'" . mysql_real_escape_string(trim($col,"'")) . "'";
 							
 						}
-						$this->flog->info("  Col #: $pos  Col: $col");
+						$this->flog->trace("  Col #: $pos  Col: $col");
 
 						$datatype = $this->table_ordinal_datatype($this->tables[$table]['schema'],$this->tables[$table]['table'],$pos+1);
 						if(strtoupper($col) === "NULL") $datatype="NULL";
@@ -863,31 +891,31 @@ EOREGEX
 						$row[] = $col;
 					}
 
-					if($valList) $valList .= ",\n";	
+					if($valList) $valList .= ",\n";
 
   				if( $DML == "UPDATE" && $this->mark_updates ) {
-			      $num_updates++;
-				    $this->flog->trace("Inside function process_rows, num_updates: ".$num_updates);
   				  if( $mode==1 ) {
   				    $mode=2;
   				  } elseif( $mode==-1 ) {
   					  $mode=-2;
   					}
 					}
-				$valList .= "($mode, @fv_uow_id, $this->binlogServerId,$gsn," . implode(",", $row) . ")";
-				$bytes = strlen($valList) + strlen($sql);
-				$allowed = floor($this->max_allowed_packet * .9);  #allowed len is 90% of max_allowed_packet	
-				if(($bytes > $allowed) || ($num_updates >= 100)) {
-				    $this->flog->trace("Inside function process_rows, after bytes allowed, sql: ".$sql);
-				    my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
-				    $valList = "";
-				    $num_updates = 0;
+          $valList .= "($mode, @fv_uow_id, $this->binlogServerId,$gsn," . implode(",", $row) . ")";
+          $bytes = strlen($valList) + strlen($sql);
+          #if(($bytes > $allowed) || ($num_rows >= 1000)) {
+          if($bytes > $allowed) {
+              $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode);
+              #my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+              $valList = "";
+              $num_rows = 0;
 				  }
 					
 				}
 				if($valList) {
-					my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+          $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode);
+					#my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 					$valList = '';
+          $num_rows = 0;
 				}
 			}
 
@@ -898,7 +926,6 @@ EOREGEX
 		unset($this->deletes);
 		$this->inserts = array();
 		$this->deletes = array();
-
 	}
 
 	/* Called for statements in the binlog.  It is possible that this can be called more than
@@ -924,257 +951,281 @@ EOREGEX
 		
 		preg_match("/([^ ]+)(.*)/", $sql, $matches);
 		
-		//print_r($matches);
+		$this->flog->trace(print_r($matches, true));
 		
 		$command = $matches[1];
 		$command = str_replace($this->delimiter,'', $command);
 		$args = $matches[2];
 
     $this->flog->trace("      Command: ".$command);
-	
-		switch(strtoupper($command)) {
-			#register change in delimiter so that we properly capture statements
-			case 'DELIMITER':
-			  $this->flog->trace("      Reset Delimeter: ".trim($args));
-				$this->delimiter = trim($args);
-				break;
-				
-			#ignore SET and USE for now.  I don't think we need it for anything.
-			case 'SET':
-			  $this->flog->trace("      Ignored.");
-				break;
 
-			case 'USE':
-			  $this->flog->trace("      Change Active DB");
-				$this->activeDB = trim($args);	
-				$this->activeDB = str_replace($this->delimiter,'', $this->activeDB);
-				break;
-				
-			#NEW TRANSACTION
-			case 'BEGIN':
-				$this->start_transaction();
-				break;
-
-			#END OF BINLOG, or binlog terminated early, or mysqlbinlog had an error
-			case 'ROLLBACK':
-				$this->rollback_transaction();
-				break;
-				
-			case 'COMMIT':
-				$this->commit_transaction();
-				break;
-				
-			#Might be interestested in CREATE statements at some point, but not right now.
-			case 'CREATE':
-			  $this->flog->trace("      Ignored.");
-				break;
-				
-			#DML IS BAD....... :(
-			case 'INSERT':
-			case 'UPDATE':
-			case 'DELETE':
-			case 'REPLACE':
-			case 'TRUNCATE':
-				$this->flog->trace("      Ignored.");
-				/* TODO: If the table is not being logged, ignore DML on it... */
-				if($this->raiseWarnings) trigger_error('Detected statement DML on a table!  Changes can not be tracked!' , E_USER_WARNING);
-				break;
-
-			case 'RENAME':
-
-				if($this->raiseWarnings) trigger_error('Detected RENAME on a table!  '.$sql, E_USER_WARNING);
-				break;
-				/*
-				#TODO: Find some way to make atomic rename atomic.  split it up for now
-				$tokens = FlexCDC::split_sql($sql);
-				
-				$clauses=array();
-				$new_sql = '';
-				$clause = "";
-				for($i=4;$i<count($tokens);++$i) {
-					#grab each alteration clause (like add column, add key or drop column)
-					if($tokens[$i] == ',') {
-						$clauses[] = $clause;
-						$clause = "";
-					} else {
-						$clause .= $tokens[$i]; 
-					}		
-				}
-				if($clause) $clauses[] = $clause;
-				$new_clauses = "";
-				
-				foreach($clauses as $clause) {
-					
-					$clause = trim(str_replace($this->delimiter, '', $clause));
-					$tokens = FlexCDC::split_sql($clause);
-					$old_table = $tokens[0];
-					if(strpos($old_table, '.') === false) {
-						$old_base_table = $old_table;
-						$old_table = $this->activeDB . '.' . $old_table;
-						$old_schema = $this->activeDB;
-						
-					} else {
-						$s = explode(".", $old_table);
-						$old_schema = $s[0];
-						$old_base_table = $s[1];
-					}
-					$old_log_table = 'mvlog_' . md5(md5($old_schema) . md5($old_base_table));
-					
-					$new_table = $tokens[4];
-					if(strpos($new_table, '.') === false) {
-						$new_schema = $this->activeDB;
-						$new_base_table = $new_table;
-						$new_table = $this->activeDB . '.' . $new_table;
-						
-					} else {
-						$s = explode(".", $new_table);
-						$new_schema = $s[0];
-						$new_base_table = $s[1];
-					}
-					
-					$new_log_table = 'mvlog_' . md5(md5($new_schema) . md5($new_base_table));
-										
-					$clause = "$old_log_table TO $new_log_table";
-							
-					$sql = "DELETE from `" . $this->mvlogs . "` where table_name='$old_base_table' and table_schema='$old_schema'";
-					
-					my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
-					$sql = "REPLACE INTO `" . $this->mvlogs . "` (mvlog_name, table_name, table_schema) values ('$new_log_table', '$new_base_table', '$new_schema')";
-					my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
-					
-					$sql = 'RENAME TABLE ' . $clause;
-					my_mysql_query($sql, $this->dest) or die1('DURING RENAME:\n' . $new_sql . "\n" . mysql_error($this->dest) . "\n");
-					my_mysql_query('commit', $this->dest);					
-				
-					$this->mvlogList = array();
-					$this->refresh_mvlog_cache();
-					
-				}
-						
-				break;
-        */
+    if ($command == $this->logName) {
+			  $this->flog->trace("      Ignored: ".$sql);
+		} else {
+      switch(strtoupper($command)) {
+        #register change in delimiter so that we properly capture statements
+      
+        case 'DELIMITER':
+          $this->flog->trace("      Reset Delimeter: ".trim($args));
+          $this->delimiter = trim($args);
+          break;
         
-			case 'ALTER':
-			  $this->flog->info("      Processing ALTER.");
-			
-				$tokens = FlexCDC::split_sql($sql);
-        $this->flog->info("tokens: ".$tokens);
-				$is_alter_table = -1;
-				foreach($tokens as $key => $token) {
-					if(strtoupper($token) == 'TABLE') {
-						$is_alter_table = $key;
-						break;
-					}
-				}
-				if(!preg_match('/\s+table\s+([^ ]+)/i', $sql, $matches)) return;
-				
-				if(empty($this->mvlogList[str_replace('.','',trim($matches[1]))])) {
-					return;
-				}
-				$table = $matches[1];
-				#switch table name to the log table
-				if(strpos($table, '.')) {
-				  $s = explode('.', $table);
-				  $old_schema = $s[0];
-				  $old_base_table = $s[1];
-				} else {
-				  $old_schema = $this->activeDB;
-				  $old_base_table = $table;
-				}
-				unset($table);
-				
-				$old_log_table = 'mvlog_' . md5(md5($old_schema) . md5($old_base_table));
-				
-				#IGNORE ALTER TYPES OTHER THAN TABLE
-				if($is_alter_table>-1) {
-					$clauses = array();
-					$clause = "";
+        #ignore SET for now.  I don't think we need it for anything.  Many SET will cause error on flexviews schema
+        case 'SET':
+				  $this->flog->trace("      ".$sql);
+          break;
 
-					for($i=$is_alter_table+4;$i<count($tokens);++$i) {
-						#grab each alteration clause (like add column, add key or drop column)
-						if($tokens[$i] == ',') {
-							$clauses[] = $clause;
-							$clause = "";
-						} else {
-							$clause .= $tokens[$i]; 
-						}		
-					}	
-					$clauses[] = $clause;
-					
-					$new_clauses = "";
-					$new_log_table="";
-					$new_schema="";
-					$new_base_Table="";
-					foreach($clauses as $clause) {
-						$clause = trim(str_replace($this->delimiter, '', $clause));
-						
-						#skip clauses we do not want to apply to mvlogs
-						if(!preg_match('/^ORDER|^DISABLE|^ENABLE|^ADD CONSTRAINT|^ADD FOREIGN|^ADD FULLTEXT|^ADD SPATIAL|^DROP FOREIGN|^ADD KEY|^ADD INDEX|^DROP KEY|^DROP INDEX|^ADD PRIMARY|^DROP PRIMARY|^ADD PARTITION|^DROP PARTITION|^COALESCE|^REORGANIZE|^ANALYZE|^CHECK|^OPTIMIZE|^REBUILD|^REPAIR|^PARTITION|^REMOVE/i', $clause)) {
-							
-							#we have four "header" columns in the mvlog.  Make it so that columns added as
-							#the FIRST column on the table go after our header columns.
-							$tokens = preg_split('/\s/', $clause);
-														
-							if(strtoupper($tokens[0]) == 'RENAME') {
-								if(strtoupper(trim($tokens[1])) == 'TO') {
-									$tokens[1] = $tokens[2];
-								}
-								
-								if(strpos($tokens[1], '.') !== false) {
-									$s = explode(".", $tokens[1]);
-									$new_schema = $s[0];
-									$new_base_table = $s[1];
-								} else {
-									$new_base_table = $tokens[1];
-									$new_schema = $this->activeDB;
-								}
-								$new_log_table = 'mvlog_' . md5(md5($new_schema) . md5($new_base_table));
-								$clause = "RENAME TO $new_log_table";
-																			
-							}
-							
-							if(strtoupper($tokens[0]) == 'ADD' && strtoupper($tokens[count($tokens)-1]) == 'FIRST') {
-								$tokens[count($tokens)-1] = 'AFTER `fv$gsn`';
-								$clause = join(' ', $tokens);
-							}
-							if($new_clauses) $new_clauses .= ', ';
-							$new_clauses .= $clause;
-						}
-					}
-					if($new_clauses) {
-						$new_alter = 'ALTER TABLE ' . $old_log_table . ' ' . $new_clauses;
-						
-						my_mysql_query($new_alter, $this->dest) or die1($new_alter. "\n" . mysql_error($this->dest) . "\n");
-						if($new_log_table) {
-							$sql = "DELETE from `" . $this->mvlogs . "` where table_name='$old_base_table' and table_schema='$old_schema'";
-							my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
+        case 'USE':
+          $this->flog->trace("      Change Active DB");
+          $this->activeDB = trim($args);	
+          $this->activeDB = str_replace($this->delimiter,'', $this->activeDB);
+          break;
+        
+        #NEW TRANSACTION
+        case 'BEGIN':
+          $this->start_transaction();
+          break;
 
-							$sql = "INSERT INTO `" . $this->mvlogs . "` (mvlog_name, table_name, table_schema) values ('$new_log_table', '$new_base_table', '$new_schema')";
-							
-							my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
-							$this->mvlogList = array();
-							$this->refresh_mvlog_cache();
-						}
-					}
-				}	
-											 
-				break;
+        #END OF BINLOG, or binlog terminated early, or mysqlbinlog had an error
+        case 'ROLLBACK':
+          $this->rollback_transaction();
+          break;
+        
+        case 'COMMIT':
+          $this->commit_transaction();
+          break;
+        
+        #Might be interestested in CREATE statements at some point, but not right now.
+        case 'CREATE':
+          send_email("Found from Source Application: ".$sql);
+          $this->flog->trace("      Ignored.");
+          break;
+        
+        #DML IS BAD....... :(
+        case 'INSERT':
+        case 'UPDATE':
+        case 'DELETE':
+        case 'REPLACE':
+        case 'TRUNCATE':
+          $this->flog->trace("      Ignored.");
+          /* TODO: If the table is not being logged, ignore DML on it... */
+          if($this->raiseWarnings) trigger_error('Detected statement DML on a table!  Changes can not be tracked!' , E_USER_WARNING);
+          break;
 
-			#DROP probably isn't bad.  We might be left with an orphaned change log.	
-			case 'DROP':
-				/* TODO: If the table is not being logged, ignore DROP on it.  
-				 *       If it is being logged then drop the log and maybe any materialized views that use the table.. 
-				 *       Maybe throw an errro if there are materialized views that use a table which is dropped... (TBD)*/
-				if($this->raiseWarnings) trigger_error('Detected DROP on a table!  '.$sql , E_USER_WARNING);
-				break;
-				
-			#I might have missed something important.  Catch it.	
-			#Maybe this should be E_USER_ERROR
-			default:
-				$this->flog->info("      Unknown Command: " . $command);
-				if($this->raiseWarnings) trigger_error('Unknown command: ' . $command, E_USER_WARNING);
-				break;
-		}
+        case 'RENAME':
+          send_email("Processing: ".$sql);
+
+          trigger_error('Detected RENAME on a table!  '.$sql, E_USER_WARNING);
+          break;
+          /*
+          #TODO: Find some way to make atomic rename atomic.  split it up for now
+          $tokens = FlexCDC::split_sql($sql);
+        
+          $clauses=array();
+          $new_sql = '';
+          $clause = "";
+          for($i=4;$i<count($tokens);++$i) {
+            #grab each alteration clause (like add column, add key or drop column)
+            if($tokens[$i] == ',') {
+              $clauses[] = $clause;
+              $clause = "";
+            } else {
+              $clause .= $tokens[$i]; 
+            }		
+          }
+          if($clause) $clauses[] = $clause;
+          $new_clauses = "";
+        
+          foreach($clauses as $clause) {
+          
+            $clause = trim(str_replace($this->delimiter, '', $clause));
+            $tokens = FlexCDC::split_sql($clause);
+            $old_table = $tokens[0];
+            if(strpos($old_table, '.') === false) {
+              $old_base_table = $old_table;
+              $old_table = $this->activeDB . '.' . $old_table;
+              $old_schema = $this->activeDB;
+            
+            } else {
+              $s = explode(".", $old_table);
+              $old_schema = $s[0];
+              $old_base_table = $s[1];
+            }
+            $old_log_table = 'mvlog_' . md5(md5($old_schema) . md5($old_base_table));
+          
+            $new_table = $tokens[4];
+            if(strpos($new_table, '.') === false) {
+              $new_schema = $this->activeDB;
+              $new_base_table = $new_table;
+              $new_table = $this->activeDB . '.' . $new_table;
+            
+            } else {
+              $s = explode(".", $new_table);
+              $new_schema = $s[0];
+              $new_base_table = $s[1];
+            }
+          
+            $new_log_table = 'mvlog_' . md5(md5($new_schema) . md5($new_base_table));
+                    
+            $clause = "$old_log_table TO $new_log_table";
+              
+            $sql = "DELETE from `" . $this->mvlogs . "` where table_name='$old_base_table' and table_schema='$old_schema'";
+          
+            my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
+            $sql = "REPLACE INTO `" . $this->mvlogs . "` (mvlog_name, table_name, table_schema) values ('$new_log_table', '$new_base_table', '$new_schema')";
+            my_mysql_query($sql, $this->dest) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
+          
+            $sql = 'RENAME TABLE ' . $clause;
+            my_mysql_query($sql, $this->dest) or die1('DURING RENAME:\n' . $new_sql . "\n" . mysql_error($this->dest) . "\n");
+            my_mysql_query('commit', $this->dest);					
+        
+            $this->refresh_mvlog_cache();
+          }
+            
+          break;
+          */
+        
+        case 'ALTER':
+          $tokens = FlexCDC::split_sql($sql);
+          
+          $is_alter_table = -1;
+          foreach($tokens as $key => $token) {
+            if(strtoupper($token) == 'TABLE') {
+              $is_alter_table = $key;
+              break;
+            }
+          }
+          
+          $this->flog->trace("  IS ALTER TABLE: ". $is_alter_table);
+          
+          if(!preg_match('/\s+table\s+([^ ]+)/i', $sql, $matches)) return;
+        
+          if(empty($this->mvlogList[str_replace('.','',trim($matches[1]))])) {
+            $this->flog->trace("  Table not in mvLogList: ". $matches[1] . " for " . $sql);
+            return;
+          }
+
+          if($this->die_on_alter == 1) {
+            send_email("FlexCDC stopping.  Found: ".$sql);
+            die1("ALTER FOUND: " .$sql);
+          }
+
+          if($this->skip_alter == 1) {
+            send_email("FlexCDC warning.  Skipping: ".$sql);
+            $this->flog->info("Skipping ALTER: ".$sql);
+          } else {
+
+            $this->flog->info("      Processing: ".$sql);
+            send_email("Processing: ".$sql);
+
+            $this->flog->info("ALTER tokens: ". print_r($tokens, true));
+
+            $table = $matches[1];
+            #switch table name to the log table
+            if(strpos($table, '.')) {
+              $s = explode('.', $table);
+              $old_schema = $s[0];
+              $old_base_table = $s[1];
+            } else {
+              $old_schema = $this->activeDB;
+              $old_base_table = $table;
+            }
+            unset($table);
+        
+            $old_log_table = 'mvlog_' . md5(md5($old_schema) . md5($old_base_table));
+        
+            #IGNORE ALTER TYPES OTHER THAN TABLE
+            if($is_alter_table>-1) {
+              $clauses = array();
+              $clause = "";
+
+              for($i=$is_alter_table+4;$i<count($tokens);++$i) {
+                #grab each alteration clause (like add column, add key or drop column)
+                if($tokens[$i] == ',') {
+                  $clauses[] = $clause;
+                  $clause = "";
+                } else {
+                  $clause .= $tokens[$i]; 
+                }		
+              }	
+              $clauses[] = $clause;
+          
+              $new_clauses = "";
+              $new_log_table="";
+              $new_schema="";
+              $new_base_Table="";
+              foreach($clauses as $clause) {
+                $clause = trim(str_replace($this->delimiter, '', $clause));
+            
+                #skip clauses we do not want to apply to mvlogs
+                if(!preg_match('/^ORDER|^DISABLE|^ENABLE|^ADD CONSTRAINT|^ADD FOREIGN|^ADD FULLTEXT|^ADD SPATIAL|^DROP FOREIGN|^ADD KEY|^ADD INDEX|^DROP KEY|^DROP INDEX|^ADD PRIMARY|^DROP PRIMARY|^ADD PARTITION|^DROP PARTITION|^COALESCE|^REORGANIZE|^ANALYZE|^CHECK|^OPTIMIZE|^REBUILD|^REPAIR|^PARTITION|^REMOVE/i', $clause)) {
+              
+                  #we have four "header" columns in the mvlog.  Make it so that columns added as
+                  #the FIRST column on the table go after our header columns.
+                  $tokens = preg_split('/\s/', $clause);
+                            
+                  if(strtoupper($tokens[0]) == 'RENAME') {
+                    if(strtoupper(trim($tokens[1])) == 'TO') {
+                      $tokens[1] = $tokens[2];
+                    }
+                
+                    if(strpos($tokens[1], '.') !== false) {
+                      $s = explode(".", $tokens[1]);
+                      $new_schema = $s[0];
+                      $new_base_table = $s[1];
+                    } else {
+                      $new_base_table = $tokens[1];
+                      $new_schema = $this->activeDB;
+                    }
+                    $new_log_table = 'mvlog_' . md5(md5($new_schema) . md5($new_base_table));
+                    $clause = "RENAME TO $new_log_table";
+                                      
+                  }
+              
+                  if(strtoupper($tokens[0]) == 'ADD' && strtoupper($tokens[count($tokens)-1]) == 'FIRST') {
+                    $tokens[count($tokens)-1] = 'AFTER `fv$gsn`';
+                    $clause = join(' ', $tokens);
+                  }
+                  if($new_clauses) $new_clauses .= ', ';
+                  $new_clauses .= $clause;
+                }
+              }
+              if($new_clauses) {
+                $new_alter = 'ALTER TABLE ' . $old_log_table . ' ' . $new_clauses;
+            
+                my_mysql_query($new_alter, $this->dest, TRUE) or die1($new_alter. "\n" . mysql_error($this->dest) . "\n");
+                if($new_log_table) {
+                  $sql = "DELETE from `" . $this->mvlogs . "` where table_name='$old_base_table' and table_schema='$old_schema'";
+                  my_mysql_query($sql, $this->dest, TRUE) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
+
+                  $sql = "INSERT INTO `" . $this->mvlogs . "` (mvlog_name, table_name, table_schema) values ('$new_log_table', '$new_base_table', '$new_schema')";
+              
+                  my_mysql_query($sql, $this->dest, TRUE) or die1($sql . "\n" . mysql_error($this->dest) . "\n");
+                  $this->refresh_mvlog_cache();
+                }
+              }
+            }	
+          }
+          break;
+
+        #DROP probably isn't bad.  We might be left with an orphaned change log.	
+        case 'DROP':
+          send_email("Found from Source Application: ".$sql);
+
+          /* TODO: If the table is not being logged, ignore DROP on it.  
+           *       If it is being logged then drop the log and maybe any materialized views that use the table.. 
+           *       Maybe throw an errro if there are materialized views that use a table which is dropped... (TBD)*/
+          if($this->raiseWarnings) trigger_error('Detected DROP on a table!  '.$sql , E_USER_WARNING);
+          break;
+        
+        #I might have missed something important.  Catch it.	
+        #Maybe this should be E_USER_ERROR
+        default:
+          $this->flog->info("      Unknown Command: " . $command . " " . $sql);
+          if($this->raiseWarnings) trigger_error('Unknown command: ' . $command, E_USER_WARNING);
+          break;
+      }
+    }
 	}
 	
 	static function ignore_clause($clause) {
@@ -1186,8 +1237,9 @@ EOREGEX
 	} 
 	
 	function process_binlog($proc, $lastLine="") {
-    $this->flog->info("Starting process_binlog ...");
-    
+
+    $rowcount = 0;
+
 		$binlogStatement="";
 		$this->timeStamp = false;
 
@@ -1201,9 +1253,19 @@ EOREGEX
 		#In this case we use that line instead of reading from the file again
 		
 		$this->current_dml = null;
+		$prev_table="";
 		
+    $this->flog->info("  binlog: ". $this->logName . " Pos: " . $this->binlogPosition);
+    
 		while( !feof($proc) || $lastLine !== '') {
 
+      $rowcount++;
+      
+      if ( ($rowcount % 2000) == 0 ) {
+        $currprocpos = ftell($proc);
+        $this->flog->info("    at file pos: " . $currprocpos . "  rows processed: " . $rowcount);
+      }
+      
 			if($lastLine) {
 				#use a previously saved line (from process_rowlog)
 				$line = $lastLine;
@@ -1217,8 +1279,9 @@ EOREGEX
 			#on each line.
 			$prefix=substr($line, 0, 5);
 			if($prefix=="ERROR") {
-				if(preg_match('/Got error/', $line)) 
+				if(preg_match('/Got error/', $line)) {
           sleep(1);
+        }
 				die1("error from mysqlbinlog: $line");
 			}
 			$matches = array();
@@ -1227,11 +1290,10 @@ EOREGEX
 			if($prefix[0] == "#") {
         $this->flog->trace("    control info: ".$line);
 				$binlogStatement = "";
-				if (preg_match('/^#([0-9]+\s+[0-9:]+)\s+server\s+id\s+([0-9]+)\s+end_log_pos ([0-9]+).*/', $line,$matches)) {
+				if (preg_match('/^#([0-9]+\s+[0-9:]+)\s+server\s+id\s+([0-9]+)\s+end_log_pos ([0-9]+).*/', $line, $matches)) {
 					$this->timeStamp = $matches[1];
-					$this->binlogPosition = $matches[3];
 					$this->binlogServerId = $matches[2];
-					#$this->set_capture_pos();
+					$this->binlogPosition = $matches[3];
 				} else {
 					#decoded RBR changes are prefixed with ###				
 					if($prefix == "### I" || $prefix == "### U" || $prefix == "### D") {
@@ -1239,7 +1301,10 @@ EOREGEX
 							$this->DML = $matches[1];
 							$this->db          = trim($matches[2],'`');
 							$this->base_table  = trim($matches[3],'`');
-              $this->flog->info("  Data Stmt: ".$this->DML." ".$this->db.".".$this->base_table);
+							if ($prev_table != $this->db.".".$this->base_table) {
+                $this->flog->info("    Data Stmt: ".$this->DML." ".$this->db.".".$this->base_table);
+                $prev_table = $this->db.".".$this->base_table;
+              }
 
 							if($this->db == $this->mvlogDB && $this->base_table == $this->mvlogs) {
 								$this->refresh_mvlog_cache();
@@ -1279,13 +1344,14 @@ EOREGEX
 					$binlogStatement = "";
 				} 
 			}
+			Logger::configure('log4php_cfg.xml');
 		}
 
-	  $this->flog->info("  Finishing process_binlog");
+	  $this->flog->info("  Finishing process_binlog. Pos:".$this->binlogPosition);
 	}
 	
 	function process_rowlog($proc) {
-    $this->flog->info("Starting process_rowlog... ");
+    $this->flog->debug("Starting process_rowlog... ");
 
 		$sql = "";
 		$skip_rows = false;
@@ -1302,7 +1368,7 @@ EOREGEX
 		
 		while($line = fgets($proc)) {
 			$line = trim($line);	
-			$this->flog->info("  Line: ".$line);
+			$this->flog->debug("  Line: ".$line);
       #DELETE and UPDATE statements contain a WHERE clause with the OLD row image
 			if($line == "### WHERE") {
 				if(!empty($this->row)) {
@@ -1336,9 +1402,6 @@ EOREGEX
 					$this->row = array();
 				}
 				$mode = 1;
-			/*} elseif(preg_match('/###\s+@[0-9]+=(-[0-9]*) .*$/', $line, $matches)) {
-				$this->row[] = $matches[1];
-			*/
 			#Row images are in format @1 = 'abc'
 			#                         @2 = 'def'
 			#Where @1, @2 are the column number in the table	
@@ -1368,7 +1431,7 @@ EOREGEX
 		#return the last line so that we can process it in the parent body
 		#you can't seek backwards in a proc stream...
     
-    $this->flog->info("Finishing process_rowlog: ".$line);
+    $this->flog->debug("Finishing process_rowlog: ".$line);
 		return $line;
 	}
 
@@ -1377,14 +1440,12 @@ EOREGEX
 		#will implicit commit	
 		$sql = "DROP TABLE IF EXISTS " . $this->mvlogDB . "." . "`%s_%s`";	
 		$sql = sprintf($sql, mysql_real_escape_string($schema), mysql_real_escape_string($table));
-		$this->flog->debug($sql);
-		if(!my_mysql_query($sql)) return false;
+		if(!my_mysql_query($sql, NULL, TRUE)) return false;
 
 		my_mysql_query("BEGIN", $this->dest);
 		$sql = "DELETE FROM " . $this->mvlogDB . ". " . $this->mvlogs . " where table_schema = '%s' and table_name = '%s'";	
 		$sql = sprintf($sql, mysql_real_escape_string($schema), mysql_real_escape_string($table));
-		$this->flog->debug($sql);
-		if(!my_mysql_query($sql)) return false;
+		if(!my_mysql_query($sql, NULL, TRUE)) return false;
 
 		return my_mysql_query('commit');
 	}

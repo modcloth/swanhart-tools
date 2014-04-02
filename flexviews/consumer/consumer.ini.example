@@ -21,6 +21,12 @@ log_retention_interval="10 DAY"
 
 ;only_databases=flexviews,db1,db2,db3
 
+;after each new table detected in the binlog, flexcdc will read the entire list of 
+;tables to be tracked.  This can be inefficient.
+;set this option to 0 to continue this as is
+;set this option to > 0 to set the number of minutes to NOT refresh the mvlog_cache
+min_check_new_track_tables=0
+
 ;FlexCDC normally records "before" images for updates (recorded as a DELETE).  This can be disabled
 ;by setting skip_before_update=true.  In that case, only an INSERT will be written.
 ;SETTING THIS OPTION *IS NOT COMPATIBLE WITH FLEXVIEWS MATERIALIZED VIEWS*!!!!!!!!!
@@ -48,6 +54,14 @@ auto_changelog=false
 ;If you set raise_warnings=true then when Flexviews sees an unsupported command (like DROP) it raises a warning to
 ;stdout.  You might want to use the 'logger' utility to capture the output if you turn this on
 raise_warnings=false
+
+;If you want to manually apply ALTER TABLE changes to tracked tables, then set this value to 1
+;flexcdc will stop running and send an email
+die_on_alter=0
+;After you've processed ALTER stmts by hand, then set this to 1 to skip the ALTER statements queued in the binlog
+;AND set die_on_alter=0, otherwise flexcdc will continue stopping
+;once you've skipping them, then stop flexcdc and set this back to 0
+skip_alter=0
 
 ;Bulk insertion inserts all changes in a transaction as one big INSERT statement.
 bulk_insert=true
