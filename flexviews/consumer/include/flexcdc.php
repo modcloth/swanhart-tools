@@ -904,16 +904,16 @@ EOREGEX
           $bytes = strlen($valList) + strlen($sql);
           #if(($bytes > $allowed) || ($num_rows >= 1000)) {
           if($bytes > $allowed) {
-              $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode);
-              #my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+              $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode . "rc: " . $row_count);
+              my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
               $valList = "";
               $num_rows = 0;
 				  }
 					
 				}
 				if($valList) {
-          $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode);
-					#my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+          $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode . "rc: " . $row_count);
+					my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 					$valList = '';
           $num_rows = 0;
 				}
@@ -1261,7 +1261,7 @@ EOREGEX
 
       $rowcount++;
       
-      if ( ($rowcount % 2000) == 0 ) {
+      if ( ($rowcount % 5000) == 0 ) {
         $currprocpos = ftell($proc);
         $this->flog->info("    at file pos: " . $currprocpos . "  rows processed: " . $rowcount);
       }
