@@ -75,7 +75,7 @@ function my_mysql_query($a, $b=NULL, $force_log=FALSE) {
   if ($force_log) {
     $logger->info(substr($a, 0, 500000));
   } else {
-    $logger->trace(substr($a, 0, 500000));
+    if ($logger->isTraceEnabled()) $logger->trace(substr($a, 0, 500000));
   }
 
 	if($b) {
@@ -179,11 +179,11 @@ EOREGEX
 		switch($connection_type) {
 			case 'source': 
 				/*TODO: support unix domain sockets */
-        $this->flog->info("Connecting to Source: ".$S['host'] . ':' . $S['port'] . " UID:" . $S['user']);
+        if ($this->flog->isInfoEnabled()) $this->flog->info("Connecting to Source: ".$S['host'] . ':' . $S['port'] . " UID:" . $S['user']);
 				$handle = mysql_connect($S['host'] . ':' . $S['port'], $S['user'], $S['password'], true) or die1('Could not connect to MySQL server:' . mysql_error());
 				return $handle;
 			case 'dest':
-        $this->flog->info("Connecting to Dest: ".$D['host'] . ':' . $D['port'] . " UID:" . $D['user']);
+        if ($this->flog->isInfoEnabled()) $this->flog->info("Connecting to Dest: ".$D['host'] . ':' . $D['port'] . " UID:" . $D['user']);
 				$handle = mysql_connect($D['host'] . ':' . $D['port'], $D['user'], $D['password'], true) or die1('Could not connect to MySQL server:' . mysql_error());
 				return $handle;
 		}
@@ -305,7 +305,7 @@ EOREGEX
 
 		$key = $schema . $table . $pos;
 		if(!empty($cache[$key])) {
-		  $this->flog->trace("    Found in cache: $key:$cache[$key]");
+		  if ($this->flog->isTraceEnabled()) $this->flog->trace("    Found in cache: $key:$cache[$key]");
 			return $cache[$key];
 		} 
 
@@ -313,7 +313,7 @@ EOREGEX
 
 		$sql = sprintf($sql, $this->mvlogDB, $log_name, $pos+4);
 
-    $this->flog->trace("    ".$sql);
+    if ($this->flog->isTraceEnabled()) $this->flog->trace("    ".$sql);
 		$stmt = my_mysql_query($sql, $this->dest);
 		if($row = mysql_fetch_array($stmt) ) {
 			$cache[$key] = $row[0];
@@ -334,7 +334,7 @@ EOREGEX
 		$sign_key = $schema . $table . $pos;
 		
 		if(!empty($sign_cache[$sign_key])) {
-		  $this->flog->trace("    Found in cache: $sign_key:".$sign_cache[$sign_key]);
+		  if ($this->flog->isTraceEnabled()) $this->flog->trace("    Found in cache: $sign_key:".$sign_cache[$sign_key]);
 		  if ($sign_cache[$sign_key] == "ZERO") {
 		    return 0;
 		  } else {
@@ -346,7 +346,7 @@ EOREGEX
 
 		$sql = sprintf($sql, $this->mvlogDB, $log_name, $pos+4);
 
-    $this->flog->trace("    ".$sql);
+    if ($this->flog->isTraceEnabled()) $this->flog->trace("    ".$sql);
 		$stmt = my_mysql_query($sql, $this->dest);
 		if($row = mysql_fetch_array($stmt) ) {
       if($row[0] == "0") {
@@ -354,7 +354,7 @@ EOREGEX
       } else {
         $sign_cache[$sign_key] = "NONZERO";
       }
-      $this->flog->trace("    adding:".$row[0]." ".$sign_cache[$sign_key]);
+      if ($this->flog->isTraceEnabled()) $this->flog->trace("    adding:".$row[0]." ".$sign_cache[$sign_key]);
 			
 			return($row[0]);
 		}
@@ -460,7 +460,7 @@ EOREGEX
 	# iterations = -1: run forever
 	public function capture_changes($iterations=1) {
 
-    $this->flog->debug("Starting function capture_changes");
+    if ($this->flog->isDebugEnabled()) $this->flog->debug("Starting function capture_changes");
 		$this->initialize();
 		
 		$count=0;
@@ -486,17 +486,19 @@ EOREGEX
 			$processedLogs = 0;
 			
 			$processed_something=FALSE;
-      $this->flog->trace("Inside capture_changes, before binlog read loop");
+      if ($this->flog->isTraceEnabled()) $this->flog->trace("Inside capture_changes, before binlog read loop");
 			while($row = mysql_fetch_assoc($stmt)) {
-        $this->flog->info(" Reading binlog: ". $row['master_log_file']);
 				++$processedLogs;
 				$this->delimiter = ';';
 	
 				if ($row['exec_master_log_pos'] < 4) $row['exec_master_log_pos'] = 4;
+
+        if ($this->flog->isInfoEnabled()) $this->flog->info(" Reading binlog: ". $row['master_log_file'] . " Pos: " . $row['exec_master_log_pos'] . " End Pos: " . $row['master_log_size']);
+
 				$execCmdLine = sprintf("%s --base64-output=decode-rows -v -R --start-position=%d --stop-position=%d %s", $this->cmdLine, $row['exec_master_log_pos'], $row['master_log_size'], $row['master_log_file']);
 				$execCmdLine .= " 2>&1";
 
-        $this->flog->debug("execCmdLine: ". $execCmdLine);
+        if ($this->flog->isDebugEnabled()) $this->flog->debug("execCmdLine: ". $execCmdLine);
 
 				$proc = popen($execCmdLine, "r");
 				if(!$proc) {
@@ -512,7 +514,7 @@ EOREGEX
 				$this->logName = $row['master_log_file'];
 				$this->process_binlog($proc, $row['master_log_file'], $row['exec_master_log_pos'],$line);
 				
-        $this->flog->trace("Inside capture_changes, Inside while loop, after process_binlog");
+        if ($this->flog->isTraceEnabled()) $this->flog->trace("Inside capture_changes, Inside while loop, after process_binlog");
         
 				$this->set_capture_pos();	
 				my_mysql_query('commit', $this->dest);
@@ -520,8 +522,8 @@ EOREGEX
 				$processed_something=TRUE;
 			}
       
-      if ($processed_something) $this->flog->trace("Finished processing binglog.");
-      $this->flog->trace("Inside capture_changes, After binlog read loop");
+      if ($processed_something && $this->flog->isTraceEnabled()) $this->flog->trace("Finished processing binglog.");
+      if ($this->flog->isTraceEnabled()) $this->flog->trace("Inside capture_changes, After binlog read loop");
 
       # if you processed something above, then increment counter
 			if($processedLogs > 0) ++$count; else sleep(1);
@@ -533,7 +535,7 @@ EOREGEX
 				} else {
 					$sleep_time += $this->settings['flexcdc']['sleep_increment'];
 					$sleep_time = $sleep_time > $this->settings['flexcdc']['sleep_maximum'] ? $this->settings['flexcdc']['sleep_maximum'] : $sleep_time;
-					$this->flog->info('Pause read of binlog. Sleep: ' . $sleep_time . " seconds." );
+					if ($this->flog->isInfoEnabled()) $this->flog->info('Pause read of binlog. Sleep: ' . $sleep_time . " seconds." );
 					sleep($sleep_time);
 				}
 			}
@@ -554,14 +556,14 @@ EOREGEX
 			die1("Could not find [flexcdc] section or .ini file not found");
 		}
 
-    $this->flog->info("Reading settings");
+    if ($this->flog->isInfoEnabled()) $this->flog->info("Reading settings");
 
 		return $settings;
 	}
 	
 	protected function refresh_mvlog_cache() {
 		
-    $this->flog->info("  Inside refresh_mvlog_cache: ");
+    if ($this->flog->isInfoEnabled()) $this->flog->info("  Inside refresh_mvlog_cache: ");
 
 		$this->mvlogList = array();
 			
@@ -575,7 +577,7 @@ EOREGEX
 	
 	/* Set up the destination connection */
 	function initialize_dest() {
-	  $this->flog->debug("initialize_dest");
+	  if ($this->flog->isDebugEnabled()) $this->flog->debug("initialize_dest");
 		#my_mysql_query("SELECT GET_LOCK('flexcdc::SOURCE_LOCK::" . $this->server_id . "',15)") or die1("COULD NOT OBTAIN LOCK\n");
 		
 		mysql_select_db($this->mvlogDB) or die1('COULD NOT CHANGE DATABASE TO:' . $this->mvlogDB . "\n");
@@ -589,7 +591,7 @@ EOREGEX
   		$stmt = my_mysql_query("select @@max_allowed_packet", $this->dest);
   		$row = mysql_fetch_array($stmt);
   		$this->max_allowed_packet = $row[0];	
-  		$this->flog->info("Max_allowed_packet: " . $this->max_allowed_packet);
+  		if ($this->flog->isInfoEnabled()) $this->flog->info("Max_allowed_packet: " . $this->max_allowed_packet);
   	}
 
 		$stmt = my_mysql_query("select gsn_hwm from {$this->mvlogDB}.{$this->mview_uow} order by uow_id desc limit 1",$this->dest) 
@@ -602,7 +604,7 @@ EOREGEX
 	/* Get the list of logs from the source and place them into a temporary table on the dest
 	    if already there, then update the current bin_log_pos for the source log */
 	function get_source_logs() {
-	  $this->flog->debug("get_source_logs");
+	  if ($this->flog->isDebugEnabled()) $this->flog->debug("get_source_logs");
 		/* This server id is not related to the server_id in the log.  It refers to the ID of the 
 		 * machine we are reading logs from.
 		 */
@@ -708,7 +710,7 @@ EOREGEX
   /* Called when a transaction commits */
 	function commit_transaction() {
 
-	  $this->flog->info("Starting commit_transaction");
+	  if ($this->flog->isInfoEnabled()) $this->flog->info("Starting commit_transaction");
 
 		//Handle bulk insertion of changes
 		if(!empty($this->inserts) || !empty($this->deletes)) {
@@ -727,7 +729,7 @@ EOREGEX
 	/* Called when a transaction rolls back */
 	function rollback_transaction() {
 	
-    $this->flog->info("Inside rollback_transaction");
+    if ($this->flog->isInfoEnabled()) $this->flog->info("Inside rollback_transaction");
     
 		$this->inserts = $this->deletes = $this->tables = array();
 		my_mysql_query("ROLLBACK", $this->dest) or die1("COULD NOT ROLLBACK TRANSACTION;\n" . mysql_error());
@@ -747,7 +749,7 @@ EOREGEX
 			$this->row['fv$gsn'] = $this->gsn_hwm;
 			$this->row['fv$DML'] = $this->DML;
 			$this->deletes[$key][] = $this->row;
-      $this->flog->debug("    Adding Delete(".$this->DML.") for: ".$this->db.".".$this->base_table);
+      if ($this->flog->isDebugEnabled()) $this->flog->debug("    Adding Delete(".$this->DML.") for: ".$this->db.".".$this->base_table);
 			if(count($this->deletes[$key]) >= 10000) {
 				$this->process_rows();	
 			}
@@ -781,7 +783,7 @@ EOREGEX
 			$this->row['fv$gsn'] = $this->gsn_hwm;
 			$this->row['fv$DML'] = $this->DML;
 			$this->inserts[$key][] = $this->row;
-      $this->flog->debug("    Adding Insert(".$this->DML.") for: ".$this->db.".".$this->base_table);
+      if ($this->flog->isDebugEnabled()) $this->flog->debug("    Adding Insert(".$this->DML.") for: ".$this->db.".".$this->base_table);
 			if(count($this->inserts[$key]) >= 10000) {
 				$this->process_rows();	
 			}
@@ -823,13 +825,13 @@ EOREGEX
 			$tables = array_keys($data);
 			foreach($tables as $table) {
 				$rows = $data[$table];	
-			  $this->flog->info("  Table: ".$table);
+			  if ($this->flog->isInfoEnabled()) $this->flog->info("  Table: ".$table);
 				$row_count = count($rows);
 				
 				$sql = sprintf("INSERT INTO %s VALUES ", $table);
 				foreach($rows as $the_row) {	
 					$num_rows++;
-				  $this->flog->debug("    building row " . $num_rows . " of " . $row_count);
+				  if ($this->flog->isDebugEnabled()) $this->flog->debug("    building row " . $num_rows . " of " . $row_count);
 					$row = array();
 					$gsn = $the_row['fv$gsn'];
 					$DML = $the_row['fv$DML'];
@@ -841,7 +843,7 @@ EOREGEX
 							$col = "'" . mysql_real_escape_string(trim($col,"'")) . "'";
 							
 						}
-						$this->flog->trace("  Col #: $pos  Col: $col");
+						if ($this->flog->isTraceEnabled()) $this->flog->trace("  Col #: $pos  Col: $col");
 
 						$datatype = $this->table_ordinal_datatype($this->tables[$table]['schema'],$this->tables[$table]['table'],$pos+1);
 						if(strtoupper($col) === "NULL") $datatype="NULL";
@@ -904,7 +906,7 @@ EOREGEX
           $bytes = strlen($valList) + strlen($sql);
           #if(($bytes > $allowed) || ($num_rows >= 1000)) {
           if($bytes > $allowed) {
-              $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode . "rc: " . $row_count);
+              if ($this->flog->isInfoEnabled()) $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count);
               my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
               $valList = "";
               $num_rows = 0;
@@ -912,7 +914,7 @@ EOREGEX
 					
 				}
 				if($valList) {
-          $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode . "rc: " . $row_count);
+          if ($this->flog->isInfoEnabled()) $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count);
 					my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 					$valList = '';
           $num_rows = 0;
@@ -935,7 +937,7 @@ EOREGEX
 
 		$sql = trim($sql);
 
-    $this->flog->trace("    Process statement: ".$sql);
+    if ($this->flog->isTraceEnabled()) $this->flog->trace("    Process statement: ".$sql);
 
 		#TODO: Not sure  if this might be important..
 		#      In general, I think we need to worry about character
@@ -951,32 +953,32 @@ EOREGEX
 		
 		preg_match("/([^ ]+)(.*)/", $sql, $matches);
 		
-		$this->flog->trace(print_r($matches, true));
+		if ($this->flog->isTraceEnabled()) $this->flog->trace(print_r($matches, true));
 		
 		$command = $matches[1];
 		$command = str_replace($this->delimiter,'', $command);
 		$args = $matches[2];
 
-    $this->flog->trace("      Command: ".$command);
+    if ($this->flog->isTraceEnabled()) $this->flog->trace("      Command: ".$command);
 
     if ($command == $this->logName) {
-			  $this->flog->trace("      Ignored: ".$sql);
+			  if ($this->flog->isTraceEnabled()) $this->flog->trace("      Ignored: ".$sql);
 		} else {
       switch(strtoupper($command)) {
         #register change in delimiter so that we properly capture statements
       
         case 'DELIMITER':
-          $this->flog->trace("      Reset Delimeter: ".trim($args));
+          if ($this->flog->isTraceEnabled()) $this->flog->trace("      Reset Delimeter: ".trim($args));
           $this->delimiter = trim($args);
           break;
         
         #ignore SET for now.  I don't think we need it for anything.  Many SET will cause error on flexviews schema
         case 'SET':
-				  $this->flog->trace("      ".$sql);
+				  if ($this->flog->isTraceEnabled()) $this->flog->trace("      ".$sql);
           break;
 
         case 'USE':
-          $this->flog->trace("      Change Active DB");
+          if ($this->flog->isTraceEnabled()) $this->flog->trace("      Change Active DB");
           $this->activeDB = trim($args);	
           $this->activeDB = str_replace($this->delimiter,'', $this->activeDB);
           break;
@@ -998,7 +1000,7 @@ EOREGEX
         #Might be interestested in CREATE statements at some point, but not right now.
         case 'CREATE':
           send_email("Found from Source Application: ".$sql);
-          $this->flog->trace("      Ignored.");
+          if ($this->flog->isTraceEnabled()) $this->flog->trace("      Ignored.");
           break;
         
         #DML IS BAD....... :(
@@ -1007,7 +1009,7 @@ EOREGEX
         case 'DELETE':
         case 'REPLACE':
         case 'TRUNCATE':
-          $this->flog->trace("      Ignored.");
+          if ($this->flog->isTraceEnabled()) $this->flog->trace("      Ignored.");
           /* TODO: If the table is not being logged, ignore DML on it... */
           if($this->raiseWarnings) trigger_error('Detected statement DML on a table!  Changes can not be tracked!' , E_USER_WARNING);
           break;
@@ -1096,12 +1098,12 @@ EOREGEX
             }
           }
           
-          $this->flog->trace("  IS ALTER TABLE: ". $is_alter_table);
+          if ($this->flog->isTraceEnabled()) $this->flog->trace("  IS ALTER TABLE: ". $is_alter_table);
           
           if(!preg_match('/\s+table\s+([^ ]+)/i', $sql, $matches)) return;
         
           if(empty($this->mvlogList[str_replace('.','',trim($matches[1]))])) {
-            $this->flog->trace("  Table not in mvLogList: ". $matches[1] . " for " . $sql);
+            if ($this->flog->isTraceEnabled()) $this->flog->trace("  Table not in mvLogList: ". $matches[1] . " for " . $sql);
             return;
           }
 
@@ -1112,13 +1114,13 @@ EOREGEX
 
           if($this->skip_alter == 1) {
             send_email("FlexCDC warning.  Skipping: ".$sql);
-            $this->flog->info("Skipping ALTER: ".$sql);
+            if ($this->flog->isInfoEnabled()) $this->flog->info("Skipping ALTER: ".$sql);
           } else {
 
-            $this->flog->info("      Processing: ".$sql);
+            if ($this->flog->isInfoEnabled()) $this->flog->info("      Processing: ".$sql);
             send_email("Processing: ".$sql);
 
-            $this->flog->info("ALTER tokens: ". print_r($tokens, true));
+            if ($this->flog->isInfoEnabled()) $this->flog->info("ALTER tokens: ". print_r($tokens, true));
 
             $table = $matches[1];
             #switch table name to the log table
@@ -1221,7 +1223,7 @@ EOREGEX
         #I might have missed something important.  Catch it.	
         #Maybe this should be E_USER_ERROR
         default:
-          $this->flog->info("      Unknown Command: " . $command . " " . $sql);
+          if ($this->flog->isInfoEnabled()) $this->flog->info("      Unknown Command: " . $command . " " . $sql);
           if($this->raiseWarnings) trigger_error('Unknown command: ' . $command, E_USER_WARNING);
           break;
       }
@@ -1255,15 +1257,16 @@ EOREGEX
 		$this->current_dml = null;
 		$prev_table="";
 		
-    $this->flog->info("  binlog: ". $this->logName . " Pos: " . $this->binlogPosition);
+    if ($this->flog->isInfoEnabled()) $this->flog->info("  binlog: ". $this->logName . " Pos: " . $this->binlogPosition);
     
 		while( !feof($proc) || $lastLine !== '') {
 
       $rowcount++;
       
-      if ( ($rowcount % 5000) == 0 ) {
+      if ( ($rowcount % 10000) == 0 ) {
         $currprocpos = ftell($proc);
-        $this->flog->info("    at file pos: " . $currprocpos . "  rows processed: " . $rowcount);
+        if ($this->flog->isInfoEnabled()) $this->flog->info("    at file pos: " . $currprocpos . "  rows processed: " . $rowcount);
+  			Logger::configure('log4php_cfg.xml');
       }
       
 			if($lastLine) {
@@ -1288,7 +1291,7 @@ EOREGEX
 
 			#Control information from MySQLbinlog is prefixed with a hash comment.
 			if($prefix[0] == "#") {
-        $this->flog->trace("    control info: ".$line);
+        if ($this->flog->isTraceEnabled()) $this->flog->trace("    Data Line: ".$line);
 				$binlogStatement = "";
 				if (preg_match('/^#([0-9]+\s+[0-9:]+)\s+server\s+id\s+([0-9]+)\s+end_log_pos ([0-9]+).*/', $line, $matches)) {
 					$this->timeStamp = $matches[1];
@@ -1302,7 +1305,7 @@ EOREGEX
 							$this->db          = trim($matches[2],'`');
 							$this->base_table  = trim($matches[3],'`');
 							if ($prev_table != $this->db.".".$this->base_table) {
-                $this->flog->info("    Data Stmt: ".$this->DML." ".$this->db.".".$this->base_table);
+                if ($this->flog->isInfoEnabled()) $this->flog->info("    Data Stmt: ".$this->DML." ".$this->db.".".$this->base_table);
                 $prev_table = $this->db.".".$this->base_table;
               }
 
@@ -1324,7 +1327,7 @@ EOREGEX
 				}
 		 
 			}	else {
-        $this->flog->trace("  Line: ".$line);
+        if ($this->flog->isTraceEnabled()) $this->flog->trace("  Line: ".$line);
 				
 				# if empty, then prime with a space
 				if($binlogStatement) {
@@ -1333,25 +1336,25 @@ EOREGEX
         
 				$binlogStatement .= $line;
 
-        $this->flog->trace("    curr stmt: ".$binlogStatement);
+        if ($this->flog->isTraceEnabled()) $this->flog->trace("    curr stmt: ".$binlogStatement);
 				
 				$pos=false;				
 				if(($pos = strpos($binlogStatement, $this->delimiter)) !== false)  {
-          $this->flog->trace("    found delimiter.");
+          if ($this->flog->isTraceEnabled()) $this->flog->trace("    found delimiter.");
 					
 					#process statement
 					$this->statement($binlogStatement);
 					$binlogStatement = "";
 				} 
 			}
-			Logger::configure('log4php_cfg.xml');
 		}
 
-	  $this->flog->info("  Finishing process_binlog. Pos:".$this->binlogPosition);
+	  if ($this->flog->isInfoEnabled()) $this->flog->info("  Finishing process_binlog. Pos:".$this->binlogPosition);
+		Logger::configure('log4php_cfg.xml');
 	}
 	
 	function process_rowlog($proc) {
-    $this->flog->debug("Starting process_rowlog... ");
+    if ($this->flog->isDebugEnabled()) $this->flog->debug("Starting process_rowlog... ");
 
 		$sql = "";
 		$skip_rows = false;
@@ -1368,7 +1371,7 @@ EOREGEX
 		
 		while($line = fgets($proc)) {
 			$line = trim($line);	
-			$this->flog->debug("  Line: ".$line);
+			if ($this->flog->isDebugEnabled()) $this->flog->debug("  Line: ".$line);
       #DELETE and UPDATE statements contain a WHERE clause with the OLD row image
 			if($line == "### WHERE") {
 				if(!empty($this->row)) {
@@ -1410,7 +1413,7 @@ EOREGEX
 
 			#This line does not start with ### so we are at the end of the images	
 			} else {
-				#$this->flog->debug(":: $line");
+				#if ($this->flog->isDebugEnabled()) $this->flog->debug(":: $line");
 				if(!$skip_rows) {
 					switch($mode) {
 						case -1:
@@ -1431,7 +1434,7 @@ EOREGEX
 		#return the last line so that we can process it in the parent body
 		#you can't seek backwards in a proc stream...
     
-    $this->flog->debug("Finishing process_rowlog: ".$line);
+    if ($this->flog->isDebugEnabled()) $this->flog->debug("Finishing process_rowlog: ".$line);
 		return $line;
 	}
 
@@ -1500,7 +1503,7 @@ EOREGEX
 		$create_stmt = my_mysql_query($v_sql, $this->dest);
 		if(!$create_stmt) die1('COULD NOT CREATE MVLOG. ' . $v_sql . "\n");
 		$exec_sql = " INSERT IGNORE INTO `". $this->mvlogDB . "`.`" . $this->mvlogs . "`( table_schema , table_name , mvlog_name ) values('$v_schema_name', '$v_table_name', '" . $base_mv_logname . "')";
-    $this->flog->debug($exec_sql);
+    if ($this->flog->isDebugEnabled()) $this->flog->debug($exec_sql);
 		my_mysql_query($exec_sql) or die1($exec_sql . ':' . mysql_error($this->dest) . "\n");
 
 		return true;
