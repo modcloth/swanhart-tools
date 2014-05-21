@@ -153,6 +153,7 @@ EOREGEX
 	protected $max_allowed_packet = 0;
 	protected $die_on_alter = 0;
 	protected $skip_alter = 0;
+	protected $default_schema = "";
 	
 	public    $raiseWarnings = false;
 	
@@ -233,6 +234,7 @@ EOREGEX
 		if(!empty($settings['flexcdc']['log_retention_interval'])) $this->log_retention_interval=$settings['flexcdc']['log_retention_interval'];
 		if(!empty($settings['flexcdc']['die_on_alter'])) $this->die_on_alter = $settings['flexcdc']['die_on_alter'];
 		if(!empty($settings['flexcdc']['skip_alter'])) $this->skip_alter = $settings['flexcdc']['skip_alter'];
+		if(!empty($settings['flexcdc']['default_schema'])) $this->default_schema = $settings['flexcdc']['default_schema'];
 		
 		foreach($settings['flexcdc'] as $kdisp => $vdisp) {
 			$this->flog->info("{$kdisp}={$vdisp}");
@@ -1102,9 +1104,16 @@ EOREGEX
           
           if(!preg_match('/\s+table\s+([^ ]+)/i', $sql, $matches)) return;
         
+          $table_name = str_replace("`", "", $matches[1]);
+          $matches[1]= $table_name;
+
+        	if ($this->flog->isTraceEnabled()) $this->flog->trace(print_r($this->mvlogList, true));
+
           if(empty($this->mvlogList[str_replace('.','',trim($matches[1]))])) {
-            if ($this->flog->isTraceEnabled()) $this->flog->trace("  Table not in mvLogList: ". $matches[1] . " for " . $sql);
-            return;
+            if(empty($this->mvlogList[str_replace('.','',trim($this->default_schema.$matches[1]))])) {
+              if ($this->flog->isInfoEnabled()) $this->flog->info("  Table not in mvLogList: ". $matches[1] . " for " . $sql);
+              return;
+            }
           }
 
           if($this->die_on_alter == 1) {
@@ -1262,7 +1271,6 @@ EOREGEX
 		while( !feof($proc) || $lastLine !== '') {
 
       $rowcount++;
-      
       if ( ($rowcount % 10000) == 0 ) {
         $currprocpos = ftell($proc);
         if ($this->flog->isInfoEnabled()) $this->flog->info("    at file pos: " . $currprocpos . "  rows processed: " . $rowcount);
