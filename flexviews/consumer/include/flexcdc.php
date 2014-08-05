@@ -147,23 +147,21 @@ EOREGEX
 
 	protected $gsn_hwm;
 	protected $dml_type;
+	protected $curr_uow_id;
 
 	protected $skip_before_update = false;
 	protected $mark_updates = false;
 	protected $max_allowed_packet = 0;
 	protected $die_on_alter = 0;
 	protected $skip_alter = 0;
-	protected $default_schema = "";
 	
 	public    $raiseWarnings = false;
 	
 	public    $delimiter = ';';
-	
 
 	protected $log_retention_interval = "10 day";
 	var       $flog;
 
-	
 	public function get_source($new = false) {
 		if($new) return $this->new_connection(SOURCE);
 		return $this->source;
@@ -234,7 +232,6 @@ EOREGEX
 		if(!empty($settings['flexcdc']['log_retention_interval'])) $this->log_retention_interval=$settings['flexcdc']['log_retention_interval'];
 		if(!empty($settings['flexcdc']['die_on_alter'])) $this->die_on_alter = $settings['flexcdc']['die_on_alter'];
 		if(!empty($settings['flexcdc']['skip_alter'])) $this->skip_alter = $settings['flexcdc']['skip_alter'];
-		if(!empty($settings['flexcdc']['default_schema'])) $this->default_schema = $settings['flexcdc']['default_schema'];
 		
 		foreach($settings['flexcdc'] as $kdisp => $vdisp) {
 			$this->flog->info("{$kdisp}={$vdisp}");
@@ -707,12 +704,15 @@ EOREGEX
 		$sql = "SET @fv_uow_id := LAST_INSERT_ID();";
 		
 		my_mysql_query($sql, $this->dest) or die1("COULD NOT EXEC:\n$sql\n" . mysql_error($this->dest));
+    $stmt = my_mysql_query("select @fv_uow_id", $this->dest);
+    $row = mysql_fetch_array($stmt);
+    $this->curr_uow_id = $row[0];	
 	}
     
   /* Called when a transaction commits */
 	function commit_transaction() {
 
-	  if ($this->flog->isInfoEnabled()) $this->flog->info("Starting commit_transaction");
+	  if ($this->flog->isInfoEnabled()) $this->flog->info("Starting commit_transaction: uow_id: ".$this->curr_uow_id);
 
 		//Handle bulk insertion of changes
 		if(!empty($this->inserts) || !empty($this->deletes)) {
@@ -771,7 +771,7 @@ EOREGEX
       }
 			$valList = "({$this->dml_type}, @fv_uow_id, {$this->binlogServerId},{$this->gsn_hwm}," . implode(",", $row) . ")";
 			$sql = sprintf("INSERT INTO `%s`.`%s` VALUES %s", $this->mvlogDB, $this->mvlog_table, $valList );
-			my_mysql_query($sql, $this->dest, TRUE) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+			my_mysql_query($sql, $this->dest, TRUE) or die1("COULD NOT EXEC SQL:\n$sql\nUOW_ID: " . $this->curr_uow_id . "\n" . mysql_error() . "\n");
 		}
 	}
 
@@ -805,7 +805,7 @@ EOREGEX
       }
 			$valList = "({$this->dml_type}, @fv_uow_id, $this->binlogServerId,{$this->gsn_hwm}," . implode(",", $row) . ")";
 			$sql = sprintf("INSERT INTO `%s`.`%s` VALUES %s", $this->mvlogDB, $this->mvlog_table, $valList );
-			my_mysql_query($sql, $this->dest, TRUE) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+			my_mysql_query($sql, $this->dest, TRUE) or die1("COULD NOT EXEC SQL:\n$sql\nUOW_ID: " . $this->curr_uow_id . "\n" . mysql_error() . "\n");
 		}
 	}
 
@@ -908,7 +908,7 @@ EOREGEX
           $bytes = strlen($valList) + strlen($sql);
           #if(($bytes > $allowed) || ($num_rows >= 1000)) {
           if($bytes > $allowed) {
-              if ($this->flog->isInfoEnabled()) $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count);
+              if ($this->flog->isInfoEnabled()) $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count . " uow_id: " . $this->curr_uow_id);
               my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
               $valList = "";
               $num_rows = 0;
@@ -916,7 +916,7 @@ EOREGEX
 					
 				}
 				if($valList) {
-          if ($this->flog->isInfoEnabled()) $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count);
+          if ($this->flog->isInfoEnabled()) $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count . " uow_id: " . $this->curr_uow_id);
 					my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 					$valList = '';
           $num_rows = 0;
@@ -980,9 +980,11 @@ EOREGEX
           break;
 
         case 'USE':
-          if ($this->flog->isTraceEnabled()) $this->flog->trace("      Change Active DB");
           $this->activeDB = trim($args);	
           $this->activeDB = str_replace($this->delimiter,'', $this->activeDB);
+          $this->activeDB = str_replace("`", "", $this->activeDB);
+
+          if ($this->flog->isInfoEnabled()) $this->flog->info("      Found Use: ".$this->activeDB."  SQL: ".$sql);
           break;
         
         #NEW TRANSACTION
@@ -1110,8 +1112,8 @@ EOREGEX
         	if ($this->flog->isTraceEnabled()) $this->flog->trace(print_r($this->mvlogList, true));
 
           if(empty($this->mvlogList[str_replace('.','',trim($matches[1]))])) {
-            if(empty($this->mvlogList[str_replace('.','',trim($this->default_schema.$matches[1]))])) {
-              if ($this->flog->isInfoEnabled()) $this->flog->info("  Table not in mvLogList: ". $matches[1] . " for " . $sql);
+            if(empty($this->mvlogList[str_replace('.','',trim($this->activeDB.$matches[1]))])) {
+              if ($this->flog->isInfoEnabled()) $this->flog->info("  Table not in mvLogList: ". $matches[1] . " or " . $this->activeDB.$matches[1] . " for " . $sql);
               return;
             }
           }

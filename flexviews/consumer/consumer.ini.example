@@ -21,9 +21,6 @@ log_retention_interval="10 DAY"
 
 ;only_databases=flexviews,db1,db2,db3
 
-;Alter statements may not contain the schema name of the table, try this schema if table not found
-;default_schema=
-
 ;after each new table detected in the binlog, flexcdc will read the entire list of 
 ;tables to be tracked.  This can be inefficient.
 ;set this option to 0 to continue this as is
