@@ -42,6 +42,7 @@ function die1($error = 1,$error2=1) {
   global $logger;
 	if(is_string($error)) { 
 		$logger->fatal('ERROR! '.$error . "\n");
+    send_email("FATAL Error in flexCDC: ".$error);
 		exit($error2);
 	} else {
 		exit($error);
@@ -712,7 +713,7 @@ EOREGEX
   /* Called when a transaction commits */
 	function commit_transaction() {
 
-	  if ($this->flog->isInfoEnabled()) $this->flog->info("Starting commit_transaction: uow_id: ".$this->curr_uow_id);
+	  if ($this->flog->isDebugEnabled()) $this->flog->debug("Starting commit_transaction: uow_id: ".$this->curr_uow_id);
 
 		//Handle bulk insertion of changes
 		if(!empty($this->inserts) || !empty($this->deletes)) {
