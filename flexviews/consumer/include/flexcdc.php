@@ -70,7 +70,7 @@ function check_stop() {
   }
 }
 
-function my_mysql_query($a, $b=NULL, $force_log=FALSE) {
+function my_mysql_query($a, $b=NULL, $force_log=FALSE, $disp_uow_id=-5) {
   global $logger;
   
   if ($force_log) {
@@ -89,8 +89,12 @@ function my_mysql_query($a, $b=NULL, $force_log=FALSE) {
 		$logger->fatal("SQL_ERROR");
     $pr = mysql_error();
     $logger->fatal($pr);
-		$logger->fatal("    STATEMENT:\n".substr($a, 0, 500000));
-    $logger->fatal(substr(print_r(debug_backtrace(),true), 0, 500000));
+    $logmsg = "    #ERROR STATEMENT:\n".substr($a, 0, 500000);
+    if ($disp_uow_id > 0) {
+      $logmsg = $logmsg." @fv_uow_id=".$disp_uow_id;
+    }
+		$logger->fatal($logmsg);
+    $logger->fatal(substr(print_r(debug_backtrace(0, 1),true), 0, 500000));
 	}
 
 	return $r;
@@ -202,6 +206,12 @@ EOREGEX
 			$settings = $this->read_settings();
 		}
 		
+    # remove stop file on start-up
+    if (file_exists('stop')) {
+        $this->flog->info("Removing stop file on start-up.");
+        unlink ('stop');
+    }
+
 		#the mysqlbinlog command line location may be set in the settings
 		#we will autodetect the location if it is not specified explicitly
 		if(!empty($settings['flexcdc']['mysqlbinlog'])) {
@@ -910,7 +920,7 @@ EOREGEX
           #if(($bytes > $allowed) || ($num_rows >= 1000)) {
           if($bytes > $allowed) {
               if ($this->flog->isInfoEnabled()) $this->flog->info("(Byte Threshold) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count . " uow_id: " . $this->curr_uow_id);
-              my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+              my_mysql_query($sql . $valList, $this->dest, FALSE, $this->curr_uow_id) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
               $valList = "";
               $num_rows = 0;
 				  }
@@ -918,7 +928,7 @@ EOREGEX
 				}
 				if($valList) {
           if ($this->flog->isInfoEnabled()) $this->flog->info("(End of Rows) Writing " . $num_rows . " to " . $table . " mode: " . $mode . " rc: " . $row_count . " uow_id: " . $this->curr_uow_id);
-					my_mysql_query($sql . $valList, $this->dest) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
+					my_mysql_query($sql . $valList, $this->dest, FALSE, $this->curr_uow_id) or die1("COULD NOT EXEC SQL:\n$sql\n" . mysql_error() . "\n");
 					$valList = '';
           $num_rows = 0;
 				}
